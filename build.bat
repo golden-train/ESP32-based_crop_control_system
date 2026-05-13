@@ -34,3 +34,4 @@ copy "%SFML%\bin\sfml-window-2.dll"   "%OUT%\" >NUL
 copy "%SFML%\bin\sfml-system-2.dll"   "%OUT%\" >NUL
 
 echo ^=^=^> DONE: %OUT%\system.exe
+//this is a test
