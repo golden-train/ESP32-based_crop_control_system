@@ -28,11 +28,15 @@ public:
     // 停止并等待线程退出
     void stop();
 
-    // 通知调度器：主线程即将发送 "0"，下一个到达的行属于正常响应
+    // 标记正在等待正常响应（必须在 writeText 之前调用，防竞态）
     void expectResponse();
 
+    // 取消等待标记（writeText 失败时回滚）
+    void clearExpectResponse();
+
     // 阻塞等待正常响应行（调用前必须先调 expectResponse()）
-    std::string waitResponse();
+    // 超时返回空字符串
+    std::string waitResponse(int timeoutMs = 3000);
 
 private:
     void readerLoop(HANDLE serialHandle);

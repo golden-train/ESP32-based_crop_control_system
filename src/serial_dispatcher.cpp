@@ -33,12 +33,17 @@ void SerialDispatcher::expectResponse()
     m_expectingResponse = true;
 }
 
-std::string SerialDispatcher::waitResponse()
+void SerialDispatcher::clearExpectResponse()
+{
+    m_expectingResponse = false;
+}
+
+std::string SerialDispatcher::waitResponse(int timeoutMs)
 {
     std::unique_lock<std::mutex> lock(m_mutex);
 
-    // 阻塞等待，直到队列中有数据
-    m_cv.wait(lock, [this] {
+    // 带超时等待，防止 ESP32 无响应时永久阻塞
+    m_cv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [this] {
         return !m_queue.empty() || !m_running;
     });
 

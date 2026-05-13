@@ -38,12 +38,17 @@ bool SerialReader::open(const std::string &portName, int baudRate)
     dcb.ByteSize = 8;                             // 8 位数据位
     dcb.Parity = NOPARITY;                        // 无校验
     dcb.StopBits = ONESTOPBIT;                    // 1 位停止位
+    dcb.fDtrControl = DTR_CONTROL_DISABLE;        // 禁止 DTR（防止 ESP32 复位）
+    dcb.fRtsControl = RTS_CONTROL_DISABLE;        // 禁止 RTS（防干扰）
 
     if (!SetCommState(m_handle, &dcb))
     {
         close();
         return false;
     }
+
+    // 清空收发缓冲区，去除上次残留的脏数据
+    PurgeComm(m_handle, PURGE_RXCLEAR | PURGE_TXCLEAR);
 
     // 设置读取超时：立即返回，不等待
     COMMTIMEOUTS timeouts = {};

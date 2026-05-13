@@ -164,23 +164,35 @@ static void runRealMode(SerialReader &reader)
         g_errorCv.notify_one();
     });
 
+    int timeoutCount = 0;
+    const int TIMEOUT_WARN_INTERVAL = 5;
+
     while (g_running)
     {
+        dispatcher.expectResponse();
+
         bool writeErr = false;
         if (!reader.writeText("0", writeErr) || writeErr)
         {
+            dispatcher.clearExpectResponse();
             logMessage(u8"[错误] 发送触发指令失败");
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
         }
 
-        dispatcher.expectResponse();
-
-        std::string line = dispatcher.waitResponse();
+        // waitResponse 有 3 秒超时，防止 ESP32 无响应时永久阻塞
+        std::string line = dispatcher.waitResponse(3000);
 
         if (!g_running) break;
         if (line.empty())
+        {
+            timeoutCount++;
+            if (timeoutCount == 1 || timeoutCount % TIMEOUT_WARN_INTERVAL == 0)
+                logMessage(std::string(u8"[警告] 串口无响应，已连续超时 ") +
+                           std::to_string(timeoutCount) + u8" 次");
             continue;
+        }
+        timeoutCount = 0; // 成功收到数据，重置超时计数
 
         SensorData data;
         if (tryParseSensorData(line, data))
