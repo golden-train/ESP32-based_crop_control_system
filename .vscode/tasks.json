@@ -1,0 +1,69 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "鍒涘缓娲诲姩鏂囦欢output鐩綍",
+            "type": "shell",
+            "command": "if (-not (Test-Path \"${workspaceFolder}/src/output\")) { New-Item -ItemType Directory -Path \"${workspaceFolder}/src/output\" | Out-Null }",
+            "problemMatcher": []
+        },
+        {
+            "label": "复制 SFML 运行库",
+            "type": "shell",
+            "command": "Copy-Item -Force -LiteralPath @('C:/tool/SFML-2.6.2/bin/sfml-graphics-2.dll','C:/tool/SFML-2.6.2/bin/sfml-window-2.dll','C:/tool/SFML-2.6.2/bin/sfml-system-2.dll') -Destination '${workspaceFolder}/src/output'",
+            "dependsOn": [
+                "鍒涘缓娲诲姩鏂囦欢output鐩綍"
+            ],
+            "dependsOrder": "sequence",
+            "problemMatcher": []
+        },
+        {
+            "label": "创建temp目录",
+            "type": "shell",
+            "command": "if (-not (Test-Path \"${workspaceFolder}/temp\")) { New-Item -ItemType Directory -Path \"${workspaceFolder}/temp\" | Out-Null }",
+            "problemMatcher": []
+        },
+        {
+            "type": "cppbuild",
+            "label": "C/C++: g++.exe 鐢熸垚娲诲姩鏂囦欢",
+            "command": "C:/tool/mingw64/bin/g++.exe",
+            "dependsOn": [
+                "创建temp目录",
+                "复制 SFML 运行库"
+            ],
+            "args": [
+                "-g",
+                "-std=c++17",
+                "-finput-charset=UTF-8",
+                "-fexec-charset=UTF-8",
+                "-IC:/tool/SFML-2.6.2/include",
+                "${workspaceFolder}/src/system.cpp",
+                "${workspaceFolder}/src/serial_reader.cpp",
+                "${workspaceFolder}/src/number_parser.cpp",
+                "${workspaceFolder}/src/analysis_rules.cpp",
+                "${workspaceFolder}/src/simulated_sensor.cpp",
+                "${workspaceFolder}/src/serial_dispatcher.cpp",
+                "${workspaceFolder}/src/data_logger.cpp",
+                "-o",
+                "${workspaceFolder}/src/output/system.exe",
+                "-LC:/tool/SFML-2.6.2/lib",
+                "-lsfml-graphics",
+                "-lsfml-window",
+                "-lsfml-system",
+                "-lopengl32",
+                "-lgdi32",
+                "-lwinmm",
+                "-Wall"
+            ],
+            "options": {
+                "cwd": "C:/tool/mingw64/bin"
+            },
+            "problemMatcher": ["$gcc"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "detail": "缂栬瘧鍣? C:/tool/mingw64/bin/g++.exe"
+        }
+    ]
+}

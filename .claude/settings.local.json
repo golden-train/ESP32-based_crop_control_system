@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(C:/tool/mingw64/bin/g++.exe -g -std=c++17 -finput-charset=UTF-8 -fexec-charset=UTF-8 -IC:/tool/SFML-2.6.2/include src/system.cpp src/serial_reader.cpp src/number_parser.cpp src/analysis_rules.cpp src/reading_analysis.cpp src/monitor_ui.cpp -o src/output/system.exe -LC:/tool/SFML-2.6.2/lib -lsfml-graphics -lsfml-window -lsfml-system -lopengl32 -lgdi32 -lwinmm -Wall)",
+      "Bash(C:/tool/mingw64/bin/g++.exe -g -std=c++17 -finput-charset=UTF-8 -fexec-charset=UTF-8 -IC:/tool/SFML-2.6.2/include src/system.cpp src/serial_reader.cpp src/number_parser.cpp src/analysis_rules.cpp src/reading_analysis.cpp src/monitor_ui.cpp src/simulated_sensor.cpp -o src/output/system.exe -LC:/tool/SFML-2.6.2/lib -lsfml-graphics -lsfml-window -lsfml-system -lopengl32 -lgdi32 -lwinmm -Wall)",
+      "Bash(timeout 3 ./system.exe)",
+      "Bash(powershell -Command \"& 'C:\\\\cpp_code\\\\for_end\\\\src\\\\output\\\\system.exe' *> 'C:\\\\cpp_code\\\\for_end\\\\temp\\\\output.txt'; Start-Sleep 3; Stop-Process -Name system -Force -ErrorAction SilentlyContinue\")",
+      "Bash(cmd /c \"cd /d C:\\\\cpp_code\\\\for_end\\\\src\\\\output && start /B system.exe > C:\\\\cpp_code\\\\for_end\\\\temp\\\\out2.txt 2>&1\")",
+      "Bash(taskkill /F /IM system.exe)",
+      "Bash(rm -f /c/cpp_code/for_end/src/output/system.exe)"
+    ]
+  }
+}

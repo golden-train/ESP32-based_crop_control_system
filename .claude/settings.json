@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c//**)",
+      "Bash(g++ -v)",
+      "Bash(pacman -Q)",
+      "Bash(dpkg -l)",
+      "Bash(bash build.sh)",
+      "Bash(unix2dos \"c:/cpp_code/for_end/build.bat\")"
+    ]
+  }
+}

@@ -1,0 +1,56 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "g++.exe - 鐢熸垚鍜岃皟璇曟椿鍔ㄦ枃浠?,
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}\\src\\output\\system.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "C:\\tool\\mingw64\\bin\\gdb.exe",
+            "setupCommands": [
+                {
+                    "description": "涓?gdb 鍚敤鏁撮綈鎵撳嵃",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "灏嗗弽姹囩紪椋庢牸璁剧疆涓?Intel",
+                    "text": "-gdb-set disassembly-flavor intel"
+                    "program": "${workspaceFolder}\\src\\output\\system.exe",
+            ],
+            "preLaunchTask": "C/C++: g++.exe 鐢熸垚娲诲姩鏂囦欢"
+        },
+        {
+            "name": "C/C++: g++.exe 鏋勫缓鍜岃皟璇曟椿鍔ㄦ枃浠?,
+            "type": "cppdbg",
+            "program": "${workspaceFolder}/src/output/system.exe",
+            "program": "${workspaceFolder}/src/output/system.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "C:\\tool\\mingw64\\bin\\gdb.exe",
+            "setupCommands": [
+                {
+                    "description": "涓?gdb 鍚敤鏁撮綈鎵撳嵃",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "灏嗗弽姹囩紪椋庢牸璁剧疆涓?Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "C/C++: g++.exe 鐢熸垚娲诲姩鏂囦欢"
+        }
+    ]
+}
