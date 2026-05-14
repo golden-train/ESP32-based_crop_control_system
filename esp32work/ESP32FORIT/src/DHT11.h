@@ -1,7 +1,7 @@
 #ifndef _DHT11_H
 #define _DHT11_H
 
-#define DHT_PIN 16
+#define DHT_PIN 26
 
 void DHT11_start(void);
 bool DHT11_read(float *temperature, float *humidity);

@@ -4,6 +4,8 @@
 #include <iomanip>
 #include <algorithm>
 #include <queue>
+#include <cstring>
+#include <cstdio>
 
 // 静态成员
 std::queue<char> SensorDisplay::s_cmdQueue;
@@ -67,12 +69,10 @@ void SensorDisplay::updateData(const SensorData &data)
     m_data = data;
 
     m_tempHistory.push_back(data.temperature);
-    m_humHistory.push_back(data.humidity);
     m_soilHistory.push_back(data.soilMoisture);
     m_lightHistory.push_back(data.lightIntensity);
 
     if (m_tempHistory.size() > HISTORY_SIZE) m_tempHistory.pop_front();
-    if (m_humHistory.size()   > HISTORY_SIZE) m_humHistory.pop_front();
     if (m_soilHistory.size()  > HISTORY_SIZE) m_soilHistory.pop_front();
     if (m_lightHistory.size() > HISTORY_SIZE) m_lightHistory.pop_front();
 }
@@ -97,6 +97,32 @@ void SensorDisplay::switchTo(Screen screen)
     m_screen = screen;
 }
 
+void SensorDisplay::setAnalysisData(double totalWater, bool alarmActive,
+                                     double avgPpfd, double dli, double avgTemp,
+                                     bool irrigating, int dataPoints)
+{
+    std::lock_guard<std::mutex> lock(m_analysisMutex);
+    m_displayTotalWater = totalWater;
+    m_displayAlarmActive = alarmActive;
+    m_displayAvgPpfd = avgPpfd;
+    m_displayDli = dli;
+    m_displayAvgTemp = avgTemp;
+    m_displayIrrigating = irrigating;
+    m_displayDataPoints = dataPoints;
+}
+
+void SensorDisplay::setGrowingArea(double area)
+{
+    std::lock_guard<std::mutex> lock(m_analysisMutex);
+    m_growingArea = area;
+}
+
+double SensorDisplay::getGrowingArea() const
+{
+    std::lock_guard<std::mutex> lock(m_analysisMutex);
+    return m_growingArea;
+}
+
 bool SensorDisplay::processEvents()
 {
     m_mousePos = sf::Mouse::getPosition(m_window);
@@ -117,24 +143,27 @@ bool SensorDisplay::processEvents()
             switch (m_screen)
             {
             case Screen::Menu: {
-                // 三个主按钮
-                const float bw = 400, bh = 80;
+                // 四个主按钮（坐标须与 drawMenu 一致）
+                const float bw = 420, bh = 72;
                 const float bx = (1280 - bw) / 2;
-                const float by1 = 280, by2 = 390, by3 = 500;
+                const float by1 = 280, by2 = 368, by3 = 456, by4 = 544;
 
                 sf::FloatRect r1{bx, by1, bw, bh};
                 sf::FloatRect r2{bx, by2, bw, bh};
                 sf::FloatRect r3{bx, by3, bw, bh};
+                sf::FloatRect r4{bx, by4, bw, bh};
 
                 sf::Vector2f mp{(float)m_mousePos.x, (float)m_mousePos.y};
                 if (r1.contains(mp)) switchTo(Screen::RealTime);
                 if (r2.contains(mp)) switchTo(Screen::Analysis);
                 if (r3.contains(mp)) switchTo(Screen::Manual);
+                if (r4.contains(mp)) switchTo(Screen::Suggestions);
                 break;
             }
             case Screen::RealTime:
             case Screen::Analysis:
-            case Screen::Manual: {
+            case Screen::Manual:
+            case Screen::Suggestions: {
                 // "← 返回" 按钮在左上角
                 sf::FloatRect backBtn{10, 10, 120, 34};
                 sf::Vector2f mp{(float)m_mousePos.x, (float)m_mousePos.y};
@@ -147,18 +176,17 @@ bool SensorDisplay::processEvents()
                 // 手动控制页的特殊按钮
                 if (m_screen == Screen::Manual)
                 {
-                    const float bw = 160, bh = 100;
-                    const float gap = 20;
-                    const float total = 5 * bw + 4 * gap;
+                    const float bw = 220, bh = 100;
+                    const float gap = 30;
+                    const float total = 4 * bw + 3 * gap;
                     const float startX = (1280 - total) / 2;
                     const float btnY = 200;
 
-                    struct { float x; char cmd; } btns[5] = {
+                    struct { float x; char cmd; } btns[4] = {
                         {startX,              '1'},
-                        {startX + (bw+gap),   '2'},
-                        {startX + 2*(bw+gap), '3'},
-                        {startX + 3*(bw+gap), '4'},
-                        {startX + 4*(bw+gap), '9'},
+                        {startX + (bw+gap),   '3'},
+                        {startX + 2*(bw+gap), '4'},
+                        {startX + 3*(bw+gap), '9'},
                     };
                     for (auto &b : btns)
                     {
@@ -167,6 +195,49 @@ bool SensorDisplay::processEvents()
                         {
                             pushCommand(b.cmd);
                             addLog(std::string(u8"[手动] 指令 ") + b.cmd + u8" 已加入队列");
+                        }
+                    }
+
+                    // 种植面积 [-] [+] 按钮
+                    {
+                        sf::FloatRect rDec{230, 300, 24, 22};
+                        sf::FloatRect rInc{260, 300, 24, 22};
+                        if (rDec.contains(mp))
+                        {
+                            double area = getGrowingArea() - 0.5;
+                            if (area < 0.1) area = 0.1;
+                            setGrowingArea(area);
+                            addLog(std::string(u8"[设置] 种植面积 ") +
+                                   std::to_string(area).substr(0, 3) + u8" m²");
+                        }
+                        if (rInc.contains(mp))
+                        {
+                            double area = getGrowingArea() + 0.5;
+                            if (area > 100) area = 100;
+                            setGrowingArea(area);
+                            addLog(std::string(u8"[设置] 种植面积 ") +
+                                   std::to_string(area).substr(0, 3) + u8" m²");
+                        }
+                    }
+
+                    // 清除报警按钮
+                    {
+                        sf::FloatRect rClear{480, 482, 130, 30};
+                        if (rClear.contains(mp))
+                        {
+                            pushCommand('8');
+                            addLog(u8"[手动] 指令 8 → 清除报警");
+                        }
+                    }
+
+                    // 建议页清除报警按钮
+                    if (m_screen == Screen::Suggestions)
+                    {
+                        sf::FloatRect rClear{1010, 82, 130, 28};
+                        if (rClear.contains(mp))
+                        {
+                            pushCommand('8');
+                            addLog(u8"[建议] 指令 8 → 清除报警");
                         }
                     }
                 }
@@ -279,12 +350,13 @@ void SensorDisplay::drawTitleBar()
 
     // 页面名称（右上角）
     const wchar_t *pageNames[] = {
-        L"", L"实时数据",  // 实时数据
-        L"数据分析",         // 数据分析
-        L"手动控制"          // 手动控制
+        L"", L"实时数据",
+        L"数据分析",
+        L"手动控制",
+        L"智能建议"
     };
     int idx = (int)m_screen;
-    if (idx > 0 && idx <= 3)
+    if (idx > 0 && idx <= 4)
     {
         sf::Text pg(pageNames[idx], m_font, 14);
         pg.setFillColor(sf::Color(130, 130, 160));
@@ -318,23 +390,25 @@ void SensorDisplay::drawMenu()
         m_window.draw(status);
     }
 
-    // 三个菜单按钮
-    const float bw = 420, bh = 82;
+    // 四个菜单按钮
+    const float bw = 420, bh = 72;
     const float bx = (1280 - bw) / 2;
-    const float by[] = {280, 390, 500};
+    const float by[] = {280, 368, 456, 544};
 
     const wchar_t *labels[] = {
         L"[实时数据]",
         L"[数据分析]",
         L"[手动控制]",
+        L"[智能建议]",
     };
     const wchar_t *descs[] = {
-        L"温度、湿度、土壤、光照实时仪表盘",
+        L"温度、土壤湿度、光照实时仪表盘",
         L"历史趋势图表与统计分析",
         L"向 ESP32 发送指令控制执行器",
+        L"基于传感器数据的操作建议",
     };
 
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < 4; i++)
     {
         sf::FloatRect rect{bx, by[i], bw, bh};
         sf::Vector2f mp{(float)m_mousePos.x, (float)m_mousePos.y};
@@ -353,9 +427,9 @@ void SensorDisplay::drawMenu()
         label.setPosition(bx + 20, by[i] + 14);
         m_window.draw(label);
 
-        sf::Text desc(descs[i], m_font, 13);
+        sf::Text desc(descs[i], m_font, 12);
         desc.setFillColor(sf::Color(140, 140, 170));
-        desc.setPosition(bx + 24, by[i] + 50);
+        desc.setPosition(bx + 24, by[i] + 44);
         m_window.draw(desc);
     }
 }
@@ -367,33 +441,29 @@ void SensorDisplay::drawRealTime()
 
     // 拷贝数据
     SensorData data;
-    std::deque<double> tHist, hHist, sHist, lHist;
+    std::deque<double> tHist, sHist, lHist;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         data  = m_data;
         tHist = m_tempHistory;
-        hHist = m_humHistory;
         sHist = m_soilHistory;
         lHist = m_lightHistory;
     }
 
-    const float gaugeW = 240.0f;
+    const float gaugeW = 300.0f;
     const float gaugeH = 340.0f;
     const float gaugeY = 70.0f;
-    const float gap    = 40.0f;
-    const float totalW = 4.0f * gaugeW + 3.0f * gap;
+    const float gap    = 50.0f;
+    const float totalW = 3.0f * gaugeW + 2.0f * gap;
     const float startX = (1280.0f - totalW) / 2.0f;
 
     drawGauge(startX,                    gaugeY, gaugeW, gaugeH,
               L"温度", data.temperature, L"°C", 0, 50,
               sf::Color(230, 80, 80));
     drawGauge(startX + (gaugeW + gap),   gaugeY, gaugeW, gaugeH,
-              L"湿度", data.humidity, L"%", 0, 100,
-              sf::Color(70, 170, 250));
-    drawGauge(startX + 2.0f * (gaugeW + gap), gaugeY, gaugeW, gaugeH,
               L"土壤湿度", data.soilMoisture, L"%", 0, 100,
               sf::Color(110, 210, 80));
-    drawGauge(startX + 3.0f * (gaugeW + gap), gaugeY, gaugeW, gaugeH,
+    drawGauge(startX + 2.0f * (gaugeW + gap), gaugeY, gaugeW, gaugeH,
               L"光照强度", data.lightIntensity, L"lux", 0, 2000,
               sf::Color(255, 220, 60));
 
@@ -404,10 +474,8 @@ void SensorDisplay::drawRealTime()
     drawHistory(startX,                    chartY, chartW, chartH,
                 tHist, 0, 50, sf::Color(230, 80, 80, 200));
     drawHistory(startX + (gaugeW + gap),   chartY, chartW, chartH,
-                hHist, 0, 100, sf::Color(70, 170, 250, 200));
-    drawHistory(startX + 2.0f * (gaugeW + gap), chartY, chartW, chartH,
                 sHist, 0, 100, sf::Color(110, 210, 80, 200));
-    drawHistory(startX + 3.0f * (gaugeW + gap), chartY, chartW, chartH,
+    drawHistory(startX + 2.0f * (gaugeW + gap), chartY, chartW, chartH,
                 lHist, 0, 2000, sf::Color(255, 220, 60, 200));
 
     drawLogs();
@@ -418,21 +486,19 @@ void SensorDisplay::drawAnalysis()
 {
     drawTitleBar();
 
-    std::deque<double> tHist, hHist, sHist, lHist;
+    std::deque<double> tHist, sHist, lHist;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         tHist = m_tempHistory;
-        hHist = m_humHistory;
         sHist = m_soilHistory;
         lHist = m_lightHistory;
     }
 
-    // 2×2 排列，每个图表更大
+    // 3 图表横向排列
     const float pad = 30.0f;
-    const float chartW = (1280.0f - pad * 3) / 2.0f;
-    const float chartH = 290.0f;
-    const float row1Y = 70.0f;
-    const float row2Y = row1Y + chartH + pad;
+    const float chartW = (1280.0f - pad * 4) / 3.0f;
+    const float chartH = 320.0f;
+    const float rowY = 70.0f;
 
     struct {
         const wchar_t *name;
@@ -442,15 +508,14 @@ void SensorDisplay::drawAnalysis()
         sf::Color color;
     } charts[] = {
         {L"温度", L"°C", tHist, 0, 50, sf::Color(230, 80, 80)},
-        {L"湿度", L"%",  hHist, 0, 100, sf::Color(70, 170, 250)},
         {L"土壤湿度", L"%",  sHist, 0, 100, sf::Color(110, 210, 80)},
         {L"光照强度", L"lux", lHist, 0, 2000, sf::Color(255, 220, 60)},
     };
 
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 3; i++)
     {
-        float cx = pad + (i % 2) * (chartW + pad);
-        float cy = (i < 2) ? row1Y : row2Y;
+        float cx = pad + i * (chartW + pad);
+        float cy = rowY;
 
         // 背景面板
         sf::RectangleShape panel({chartW, chartH});
@@ -564,7 +629,7 @@ void SensorDisplay::drawManualControl()
     heading.setPosition((1280 - hb.width) / 2, 80);
     m_window.draw(heading);
 
-    // 5 个指令按钮
+    // 4 个指令按钮（湿度=土壤湿度，已合并到[土壤]）
     struct CmdBtn {
         wchar_t label[20];
         char cmd;
@@ -572,11 +637,9 @@ void SensorDisplay::drawManualControl()
         sf::Color color;
     };
     CmdBtn btns[] = {
-        {L"[光照]", '1', L"增加补光",
+        {L"[光照]", '1', L"开启 / 关闭补光",
          sf::Color(220, 180, 50)},
-        {L"[湿度]", '2', L"开启加湿器",
-         sf::Color(50, 150, 230)},
-        {L"[温度]", '3', L"开启散热风扇",
+        {L"[温度]", '3', L"散热风扇 / 蜂鸣器",
          sf::Color(220, 80, 60)},
         {L"[土壤]", '4', L"开启灌溉系统",
          sf::Color(80, 180, 60)},
@@ -584,13 +647,13 @@ void SensorDisplay::drawManualControl()
          sf::Color(180, 50, 50)},
     };
 
-    const float bw = 180, bh = 110;
-    const float gap = 18;
-    const float total = 5 * bw + 4 * gap;
+    const float bw = 220, bh = 110;
+    const float gap = 30;
+    const float total = 4 * bw + 3 * gap;
     const float startX = (1280 - total) / 2;
     const float btnY = 140;
 
-    for (int i = 0; i < 5; i++)
+    for (int i = 0; i < 4; i++)
     {
         float bx = startX + i * (bw + gap);
         sf::FloatRect rect{bx, btnY, bw, bh};
@@ -629,24 +692,22 @@ void SensorDisplay::drawManualControl()
         m_window.draw(desc);
     }
 
+    // ── 三个分析面板 ────────────────────────────
+    drawParPanel(30, 270, 1220);
+    drawWaterPanel(30, 388, 1220);
+    drawAlarmPanel(30, 476, 1220);
+
     // 最近指令记录
-    sf::Text logTitle(L"最近指令记录", // 最近指令记录
-                      m_font, 15);
+    sf::Text logTitle(L"最近指令记录",
+                      m_font, 13);
     logTitle.setStyle(sf::Text::Bold);
-    logTitle.setFillColor(sf::Color(180, 180, 200));
-    logTitle.setPosition(30, 300);
+    logTitle.setFillColor(sf::Color(160, 160, 180));
+    logTitle.setPosition(30, 565);
     m_window.draw(logTitle);
 
-    sf::Text instr(L"点击上方按钮发送指令，"
-                   L"指令将通过串口发送给 ESP32",
-                   m_font, 13);
-    instr.setFillColor(sf::Color(130, 130, 160));
-    instr.setPosition(30, 328);
-    m_window.draw(instr);
-
     // 显示最近的手动指令日志
-    sf::Text logText(L"", m_font, 13);
-    logText.setFillColor(sf::Color(160, 200, 255));
+    sf::Text logText(L"", m_font, 12);
+    logText.setFillColor(sf::Color(150, 180, 220));
 
     std::vector<std::string> localLogs;
     {
@@ -654,7 +715,7 @@ void SensorDisplay::drawManualControl()
         localLogs = m_logs;
     }
 
-    float ly = 360;
+    float ly = 588;
     int shown = 0;
     for (int i = (int)localLogs.size() - 1; i >= 0 && shown < 8; --i, ++shown)
     {
@@ -666,6 +727,468 @@ void SensorDisplay::drawManualControl()
         ly += 22;
     }
 }
+
+// ── 面板：PAR + 种植面积 ──────────────────────────────
+void SensorDisplay::drawParPanel(float x, float y, float w)
+{
+    // 读分析数据
+    double growingArea, avgPpfd, dli, avgTemp;
+    int dataPoints;
+    {
+        std::lock_guard<std::mutex> lock(m_analysisMutex);
+        growingArea = m_growingArea;
+        avgPpfd     = m_displayAvgPpfd;
+        dli         = m_displayDli;
+        avgTemp     = m_displayAvgTemp;
+        dataPoints  = m_displayDataPoints;
+    }
+
+    sf::RectangleShape bg({w, 110});
+    bg.setPosition(x, y);
+    bg.setFillColor(sf::Color(28, 28, 44));
+    bg.setOutlineThickness(1);
+    bg.setOutlineColor(sf::Color(50, 50, 70));
+    m_window.draw(bg);
+
+    // 标题
+    sf::Text title(L"光照 & PAR", m_font, 14);
+    title.setStyle(sf::Text::Bold);
+    title.setFillColor(sf::Color(200, 200, 220));
+    title.setPosition(x + 12, y + 6);
+    m_window.draw(title);
+
+    // 种植面积 [+]/[-] 按钮
+    sf::Text areaLabel(L"种植面积:", m_font, 13);
+    areaLabel.setFillColor(sf::Color(140, 140, 170));
+    areaLabel.setPosition(x + 12, y + 32);
+    m_window.draw(areaLabel);
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.1f m²", growingArea);
+    sf::Text areaVal(sf::String::fromUtf8((const uint8_t*)buf, (const uint8_t*)buf + strlen(buf)), m_font, 13);
+    areaVal.setFillColor(sf::Color::White);
+    areaVal.setPosition(x + 110, y + 32);
+    m_window.draw(areaVal);
+
+    // [-] 按钮
+    sf::RectangleShape btnDec({24, 22});
+    btnDec.setPosition(x + 200, y + 30);
+    btnDec.setFillColor(sf::Color(50, 50, 72));
+    btnDec.setOutlineThickness(1);
+    btnDec.setOutlineColor(sf::Color(80, 80, 110));
+    m_window.draw(btnDec);
+    sf::Text decTxt(L"-", m_font, 16);
+    decTxt.setFillColor(sf::Color::White);
+    decTxt.setPosition(x + 210, y + 30);
+    m_window.draw(decTxt);
+
+    // [+] 按钮
+    sf::RectangleShape btnInc({24, 22});
+    btnInc.setPosition(x + 230, y + 30);
+    btnInc.setFillColor(sf::Color(50, 50, 72));
+    btnInc.setOutlineThickness(1);
+    btnInc.setOutlineColor(sf::Color(80, 80, 110));
+    m_window.draw(btnInc);
+    sf::Text incTxt(L"+", m_font, 16);
+    incTxt.setFillColor(sf::Color::White);
+    incTxt.setPosition(x + 240, y + 30);
+    m_window.draw(incTxt);
+
+    // PPFD
+    snprintf(buf, sizeof(buf), "PPFD: %.1f \xb5mol/m\xb2/s", avgPpfd);
+    sf::Text ppfdTxt(sf::String::fromUtf8((const uint8_t*)buf, (const uint8_t*)buf + strlen(buf)), m_font, 13);
+    ppfdTxt.setFillColor(sf::Color(180, 220, 100));
+    ppfdTxt.setPosition(x + 12, y + 58);
+    m_window.draw(ppfdTxt);
+
+    // DLI
+    snprintf(buf, sizeof(buf), "DLI: %.1f mol/m\xb2", dli);
+    sf::Text dliTxt(sf::String::fromUtf8((const uint8_t*)buf, (const uint8_t*)buf + strlen(buf)), m_font, 13);
+    dliTxt.setFillColor(sf::Color(100, 200, 220));
+    dliTxt.setPosition(x + 280, y + 58);
+    m_window.draw(dliTxt);
+
+    // 数据点计数
+    snprintf(buf, sizeof(buf), "数据点: %d (每5分钟)", dataPoints);
+    sf::Text countTxt(sf::String::fromUtf8((const uint8_t*)buf, (const uint8_t*)buf + strlen(buf)), m_font, 12);
+    countTxt.setFillColor(sf::Color(120, 120, 150));
+    countTxt.setPosition(x + 12, y + 82);
+    m_window.draw(countTxt);
+
+    // 平均温度
+    snprintf(buf, sizeof(buf), "平均温度: %.1f \x0d\x0ac", avgTemp);
+    // Use simple °C instead
+    snprintf(buf, sizeof(buf), "平均温度: %.1f C", avgTemp);
+    sf::Text avgTempTxt(sf::String::fromUtf8((const uint8_t*)buf, (const uint8_t*)buf + strlen(buf)), m_font, 12);
+    avgTempTxt.setFillColor(sf::Color(120, 120, 150));
+    avgTempTxt.setPosition(x + 280, y + 82);
+    m_window.draw(avgTempTxt);
+}
+
+// ── 面板：用水量 ──────────────────────────────────────
+void SensorDisplay::drawWaterPanel(float x, float y, float w)
+{
+    double totalWater;
+    bool irrigating;
+    {
+        std::lock_guard<std::mutex> lock(m_analysisMutex);
+        totalWater  = m_displayTotalWater;
+        irrigating = m_displayIrrigating;
+    }
+
+    sf::RectangleShape bg({w, 80});
+    bg.setPosition(x, y);
+    bg.setFillColor(sf::Color(24, 24, 40));
+    bg.setOutlineThickness(1);
+    bg.setOutlineColor(sf::Color(50, 50, 70));
+    m_window.draw(bg);
+
+    sf::Text title(L"灌溉 & 用水量", m_font, 14);
+    title.setStyle(sf::Text::Bold);
+    title.setFillColor(sf::Color(200, 200, 220));
+    title.setPosition(x + 12, y + 6);
+    m_window.draw(title);
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "累计用水量: %.1f L", totalWater);
+    sf::Text waterTxt(sf::String::fromUtf8((const uint8_t*)buf, (const uint8_t*)buf + strlen(buf)), m_font, 14);
+    waterTxt.setFillColor(sf::Color(100, 200, 255));
+    waterTxt.setPosition(x + 180, y + 8);
+    m_window.draw(waterTxt);
+
+    sf::Text statusTxt(irrigating ? L"灌溉状态: ● 运行中" : L"灌溉状态: ○ 已停止", m_font, 13);
+    statusTxt.setFillColor(irrigating ? sf::Color(80, 220, 80) : sf::Color(160, 160, 180));
+    statusTxt.setPosition(x + 180, y + 34);
+    m_window.draw(statusTxt);
+
+    sf::Text hint(L"土壤 < 55% 开启 | > 73% 关闭 | 温度报警中禁止灌溉", m_font, 11);
+    hint.setFillColor(sf::Color(120, 120, 150));
+    hint.setPosition(x + 180, y + 56);
+    m_window.draw(hint);
+}
+
+// ── 面板：报警状态 + 清除按钮 ──────────────────────────
+void SensorDisplay::drawAlarmPanel(float x, float y, float w)
+{
+    bool alarmActive;
+    {
+        std::lock_guard<std::mutex> lock(m_analysisMutex);
+        alarmActive = m_displayAlarmActive;
+    }
+
+    sf::RectangleShape bg({w, 80});
+    bg.setPosition(x, y);
+    bg.setFillColor(sf::Color(28, 24, 24));
+    bg.setOutlineThickness(1);
+    bg.setOutlineColor(alarmActive ? sf::Color(180, 50, 50) : sf::Color(50, 50, 70));
+    m_window.draw(bg);
+
+    sf::Text title(L"报警状态", m_font, 14);
+    title.setStyle(sf::Text::Bold);
+    title.setPosition(x + 10, y + 6);
+    title.setFillColor(alarmActive ? sf::Color(255, 80, 60) : sf::Color(160, 160, 180));
+    m_window.draw(title);
+
+    sf::Text status(alarmActive ? L"[报警] 温度报警激活中 — 灌溉已禁止"
+                                : L"[正常] 无报警", m_font, 14);
+    status.setFillColor(alarmActive ? sf::Color(255, 100, 80) : sf::Color(140, 200, 140));
+    status.setPosition(x + 120, y + 8);
+    m_window.draw(status);
+
+    // 清除报警按钮
+    sf::FloatRect btnRect{x + 450, y + 6, 130, 30};
+    sf::Vector2f mp{(float)m_mousePos.x, (float)m_mousePos.y};
+    bool hover = btnRect.contains(mp);
+
+    sf::RectangleShape btn({130, 30});
+    btn.setPosition(x + 450, y + 6);
+    btn.setFillColor(hover ? sf::Color(160, 50, 50) : sf::Color(120, 40, 40));
+    btn.setOutlineThickness(1);
+    btn.setOutlineColor(sf::Color(200, 80, 60));
+    m_window.draw(btn);
+
+    sf::Text clearTxt(L"清除报警 [8]", m_font, 13);
+    clearTxt.setStyle(sf::Text::Bold);
+    clearTxt.setFillColor(hover ? sf::Color::White : sf::Color(220, 180, 180));
+    clearTxt.setPosition(x + 458, y + 9);
+    m_window.draw(clearTxt);
+}
+
+// ── 绘制：智能建议 ─────────────────────────────────────────
+void SensorDisplay::drawSuggestions()
+{
+    drawTitleBar();
+
+    if (!m_fontLoaded) return;
+
+    // 拷贝实时数据 + 分析数据
+    SensorData data;
+    double totalWater, avgPpfd, dli, avgTemp;
+    bool alarmActive, irrigating;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        data = m_data;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_analysisMutex);
+        totalWater  = m_displayTotalWater;
+        avgPpfd     = m_displayAvgPpfd;
+        dli         = m_displayDli;
+        avgTemp     = m_displayAvgTemp;
+        alarmActive = m_displayAlarmActive;
+        irrigating = m_displayIrrigating;
+    }
+
+    const float leftX = 40.0f;
+    const float panelW = 580.0f;
+    const float rightX = 660.0f;
+    const float colW = 560.0f;
+
+    // ── 左列：指标状态 + 建议 ─────────────────────────
+    sf::RectangleShape leftPanel({panelW, 640.0f});
+    leftPanel.setPosition(leftX, 70.0f);
+    leftPanel.setFillColor(sf::Color(28, 28, 44));
+    leftPanel.setOutlineThickness(1);
+    leftPanel.setOutlineColor(sf::Color(50, 50, 70));
+    m_window.draw(leftPanel);
+
+    sf::Text leftTitle(L"指标状态与建议", m_font, 16);
+    leftTitle.setStyle(sf::Text::Bold);
+    leftTitle.setFillColor(sf::Color(200, 200, 220));
+    leftTitle.setPosition(leftX + 14, 80);
+    m_window.draw(leftTitle);
+
+    // 逐项判断
+    struct {
+        const char *label;
+        double value;
+        const char *unit;
+        bool ok;
+        const char *advice;
+        sf::Color okColor;
+    } items[4] = {
+        {u8"土壤湿度", data.soilMoisture, u8"%",
+         data.soilMoisture >= 30 && data.soilMoisture <= 65,
+         data.soilMoisture < 30 ? u8"建议开启灌溉" : u8"建议关闭灌溉或等待回落",
+         sf::Color(110, 210, 80)},
+
+        {u8"温度", data.temperature, u8"°C",
+         !alarmActive,
+         u8"温度过高！灌溉已禁止，请检查散热",
+         sf::Color(230, 80, 80)},
+
+        {u8"光照", data.lightIntensity, u8"lux",
+         data.lightIntensity >= 50,
+         u8"光照偏低，建议开启补光",
+         sf::Color(255, 220, 60)},
+
+        {u8"温度趋势", 0, u8"",
+         m_displayDataPoints < 6,
+         u8"温度持续上升，建议检查通风",
+         sf::Color(200, 160, 80)},
+    };
+
+    float iy = 110;
+    for (int i = 0; i < 4; i++)
+    {
+        char buf[128];
+        if (i == 3)
+        {
+            // 趋势行特殊处理
+            items[3].ok = (m_displayDataPoints < 6);
+            snprintf(buf, sizeof(buf), "数据点: %d", m_displayDataPoints);
+        }
+        else
+        {
+            snprintf(buf, sizeof(buf), "%s: %.1f%s",
+                     items[i].label, items[i].value, items[i].unit);
+        }
+
+        sf::Text valTxt(sf::String::fromUtf8(
+            (const uint8_t*)buf, (const uint8_t*)buf + strlen(buf)), m_font, 14);
+        valTxt.setFillColor(items[i].ok ? sf::Color(180, 200, 180) : sf::Color(220, 160, 140));
+        valTxt.setPosition(leftX + 20, iy);
+        m_window.draw(valTxt);
+
+        // 状态指示
+        sf::Text status(items[i].ok ? L"[正常]" : L"[异常]", m_font, 14);
+        status.setFillColor(items[i].ok ? sf::Color(80, 200, 80) : sf::Color(240, 180, 40));
+        status.setPosition(leftX + 340, iy);
+        m_window.draw(status);
+
+        if (!items[i].ok)
+        {
+            sf::Text advise(sf::String::fromUtf8(
+                (const uint8_t*)items[i].advice,
+                (const uint8_t*)items[i].advice + strlen(items[i].advice)), m_font, 12);
+            advise.setFillColor(sf::Color(200, 180, 100));
+            advise.setPosition(leftX + 24, iy + 22);
+            m_window.draw(advise);
+        }
+
+        iy += 58;
+    }
+
+    // ── 右列 ─────────────────────────────────────────
+    // 区块2：报警状态
+    sf::RectangleShape alarmPanel({colW, 140.0f});
+    alarmPanel.setPosition(rightX, 70.0f);
+    alarmPanel.setFillColor(sf::Color(28, 24, 24));
+    alarmPanel.setOutlineThickness(1);
+    alarmPanel.setOutlineColor(alarmActive ? sf::Color(180, 50, 50) : sf::Color(50, 50, 70));
+    m_window.draw(alarmPanel);
+
+    sf::Text alarmTitle(alarmActive ? L"[报警状态]" : L"[无报警]", m_font, 15);
+    alarmTitle.setStyle(sf::Text::Bold);
+    alarmTitle.setFillColor(alarmActive ? sf::Color(255, 80, 60) : sf::Color(140, 200, 140));
+    alarmTitle.setPosition(rightX + 14, 80);
+    m_window.draw(alarmTitle);
+
+    if (alarmActive)
+    {
+        sf::Text alarmDesc(u8"温度报警激活中 — 灌溉已禁止", m_font, 13);
+        alarmDesc.setFillColor(sf::Color(220, 160, 140));
+        alarmDesc.setPosition(rightX + 18, 108);
+        m_window.draw(alarmDesc);
+
+        sf::Text alarmHint(u8"请检查温度状况，确认正常后点击下方清除报警", m_font, 11);
+        alarmHint.setFillColor(sf::Color(150, 130, 120));
+        alarmHint.setPosition(rightX + 18, 130);
+        m_window.draw(alarmHint);
+
+        // 清除按钮
+        sf::FloatRect btnRect{rightX + 350, 82, 130, 28};
+        sf::Vector2f mp{(float)m_mousePos.x, (float)m_mousePos.y};
+        bool hover = btnRect.contains(mp);
+
+        sf::RectangleShape btn({130, 28});
+        btn.setPosition(rightX + 350, 82);
+        btn.setFillColor(hover ? sf::Color(160, 50, 50) : sf::Color(120, 40, 40));
+        btn.setOutlineThickness(1);
+        btn.setOutlineColor(sf::Color(200, 80, 60));
+        m_window.draw(btn);
+        sf::Text btnTxt(L"清除报警 [8]", m_font, 13);
+        btnTxt.setStyle(sf::Text::Bold);
+        btnTxt.setFillColor(hover ? sf::Color::White : sf::Color(220, 180, 180));
+        btnTxt.setPosition(rightX + 358, 85);
+        m_window.draw(btnTxt);
+    }
+
+    // 区块3：统计摘要
+    sf::RectangleShape statsPanel({colW, 260.0f});
+    statsPanel.setPosition(rightX, 230.0f);
+    statsPanel.setFillColor(sf::Color(28, 28, 44));
+    statsPanel.setOutlineThickness(1);
+    statsPanel.setOutlineColor(sf::Color(50, 50, 70));
+    m_window.draw(statsPanel);
+
+    sf::Text statsTitle(L"统计摘要", m_font, 15);
+    statsTitle.setStyle(sf::Text::Bold);
+    statsTitle.setFillColor(sf::Color(200, 200, 220));
+    statsTitle.setPosition(rightX + 14, 240);
+    m_window.draw(statsTitle);
+
+    char buf[128];
+    int sy = 272;
+    struct { const char *fmt; double v; const char *unit; } stats[] = {
+        {u8"累计用水量: %.1f %s",  totalWater, u8"L"},
+        {u8"全程平均温度: %.1f %s", avgTemp,   u8"°C"},
+        {u8"平均 PPFD: %.1f %s",   avgPpfd,   u8"μmol/m²/s"},
+        {u8"累计 DLI: %.1f %s",    dli,        u8"mol/m²"},
+    };
+    for (auto &s : stats)
+    {
+        snprintf(buf, sizeof(buf), s.fmt, s.v, s.unit);
+        sf::Text line(sf::String::fromUtf8(
+            (const uint8_t*)buf, (const uint8_t*)buf + strlen(buf)), m_font, 13);
+        line.setFillColor(sf::Color(150, 170, 190));
+        line.setPosition(rightX + 18, sy);
+        m_window.draw(line);
+        sy += 32;
+    }
+
+    // 灌溉状态
+    sf::Text irrTxt(irrigating ? L"灌溉状态: ● 运行中" : L"灌溉状态: ○ 已停止", m_font, 13);
+    irrTxt.setFillColor(irrigating ? sf::Color(80, 220, 80) : sf::Color(160, 160, 180));
+    irrTxt.setPosition(rightX + 18, sy + 8);
+    m_window.draw(irrTxt);
+}
+
+// ── 底部执行器状态条（所有页面共用） ──────────────────────
+void SensorDisplay::drawActuatorBar()
+{
+    if (!m_fontLoaded) return;
+
+    sf::RectangleShape bar({1280.0f, 28.0f});
+    bar.setPosition(0.0f, 772.0f);
+    bar.setFillColor(sf::Color(12, 12, 20));
+    m_window.draw(bar);
+
+    sf::Text prefix(L"执行器:", m_font, 12);
+    prefix.setFillColor(sf::Color(130, 130, 160));
+    prefix.setPosition(14.0f, 778.0f);
+    m_window.draw(prefix);
+
+    struct { const char *label; bool on; sf::Color onColor; } act[] = {
+        {u8"LED",   m_ledOn,    sf::Color(255, 220, 60)},
+        {u8"水泵",  m_pumpOn,   sf::Color(80, 180, 255)},
+        {u8"蜂鸣器", m_buzzerOn, sf::Color(255, 80, 60)},
+    };
+
+    float cx = 90.0f;
+    for (auto &a : act)
+    {
+        sf::CircleShape dot(5.0f);
+        dot.setFillColor(a.on ? a.onColor : sf::Color(60, 60, 70));
+        dot.setPosition(cx, 781.0f);
+        m_window.draw(dot);
+
+        sf::Text label(sf::String::fromUtf8(
+            (const uint8_t*)a.label,
+            (const uint8_t*)a.label + strlen(a.label)), m_font, 12);
+        label.setFillColor(a.on ? sf::Color(200, 200, 220) : sf::Color(90, 90, 110));
+        label.setPosition(cx + 12.0f, 778.0f);
+        m_window.draw(label);
+        cx += 80.0f;
+    }
+
+    // 右侧：连接状态 + 页面
+    sf::Text status(
+        m_connected ? L"COM6 已连接" : L"演示模式",
+        m_font, 12);
+    status.setFillColor(m_connected ? sf::Color(80, 220, 80) : sf::Color(240, 180, 40));
+    status.setPosition(1280.0f - status.getLocalBounds().width - 100.0f, 778.0f);
+    m_window.draw(status);
+
+    char pageBuf[32];
+    snprintf(pageBuf, sizeof(pageBuf), "页面: %d", (int)m_screen);
+    sf::Text pageTxt(sf::String::fromUtf8(
+        (const uint8_t*)pageBuf,
+        (const uint8_t*)pageBuf + strlen(pageBuf)), m_font, 11);
+    pageTxt.setFillColor(sf::Color(100, 100, 120));
+    pageTxt.setPosition(1280.0f - pageTxt.getLocalBounds().width - 14.0f, 778.0f);
+    m_window.draw(pageTxt);
+}
+
+// ── 执行器状态同步 ──────────────────────────────────────
+void SensorDisplay::applyCommand(char cmd)
+{
+    switch (cmd)
+    {
+    case '1': m_ledOn    = true;  break;
+    case '5': m_ledOn    = false; break;
+    case '2': m_pumpOn   = true;  break;
+    case '4': m_pumpOn   = true;  break;
+    case '6': m_pumpOn   = false; break;
+    case '3': m_buzzerOn = true;  break;
+    case '8': m_buzzerOn = false; break;
+    case '9': m_ledOn = m_pumpOn = m_buzzerOn = false; break;
+    }
+}
+
+bool SensorDisplay::isLedOn()    const { return m_ledOn; }
+bool SensorDisplay::isPumpOn()   const { return m_pumpOn; }
+bool SensorDisplay::isBuzzerOn() const { return m_buzzerOn; }
 
 // ── 绘制：单个仪表 ────────────────────────────────────────
 void SensorDisplay::drawGauge(float x, float y, float w, float h,
@@ -893,15 +1416,15 @@ void SensorDisplay::render()
 
     switch (m_screen)
     {
-    case Screen::Menu:     drawMenu();     break;
-    case Screen::RealTime: drawRealTime(); break;
-    case Screen::Analysis: drawAnalysis(); break;
-    case Screen::Manual:   drawManualControl(); break;
+    case Screen::Menu:        drawMenu();        break;
+    case Screen::RealTime:    drawRealTime();    break;
+    case Screen::Analysis:    drawAnalysis();    break;
+    case Screen::Manual:      drawManualControl(); break;
+    case Screen::Suggestions: drawSuggestions(); break;
     }
 
-    // 非菜单页 + 非手动页显示状态栏
-    if (m_screen == Screen::RealTime)
-        drawStatusBar();
+    // 所有页面底部显示执行器状态条 + 连接状态
+    drawActuatorBar();
 
     m_window.display();
 }

@@ -15,7 +15,8 @@ enum class Screen
     Menu,       // 主菜单
     RealTime,   // 实时数据查看
     Analysis,   // 数据分析
-    Manual      // 手动控制
+    Manual,     // 手动控制
+    Suggestions // 智能建议
 };
 
 // SFML 传感器数据显示仪表盘
@@ -39,6 +40,19 @@ public:
     static void pushCommand(char cmd);
     static bool popCommand(char &cmd);
 
+    // === 分析数据显示（数据线程调用） ===
+    void setAnalysisData(double totalWater, bool alarmActive,
+                         double avgPpfd, double dli, double avgTemp,
+                         bool irrigating, int dataPoints);
+    void setGrowingArea(double area);
+    double getGrowingArea() const;
+
+    // === 执行器状态跟踪（数据线程调用） ===
+    void applyCommand(char cmd);  // 发送指令后同步更新状态
+    bool  isLedOn()    const;
+    bool  isPumpOn()   const;
+    bool  isBuzzerOn() const;
+
 private:
     // 各页面绘制
     void drawTitleBar();
@@ -58,6 +72,17 @@ private:
                      const sf::Color &color);
     void drawLogs();
     void drawStatusBar();
+
+    // Manual 页新增面板
+    void drawParPanel(float x, float y, float w);
+    void drawWaterPanel(float x, float y, float w);
+    void drawAlarmPanel(float x, float y, float w);
+
+    // 智能建议页
+    void drawSuggestions();
+
+    // 各页共用：底部执行器状态条
+    void drawActuatorBar();
 
     // 按钮辅助
     struct ButtonDef
@@ -86,7 +111,6 @@ private:
 
     SensorData m_data;
     std::deque<double> m_tempHistory;
-    std::deque<double> m_humHistory;
     std::deque<double> m_soilHistory;
     std::deque<double> m_lightHistory;
     std::vector<std::string> m_logs;
@@ -94,6 +118,22 @@ private:
     std::mutex m_mutex;
     bool m_connected = false;
     sf::Clock m_clock;
+
+    // 分析数据显示（互斥锁保护）
+    mutable std::mutex m_analysisMutex;
+    double m_displayTotalWater = 0;
+    double m_displayAvgPpfd = 0;
+    double m_displayDli = 0;
+    double m_displayAvgTemp = 0;
+    bool   m_displayAlarmActive = false;
+    bool   m_displayIrrigating = false;
+    int    m_displayDataPoints = 0;
+    double m_growingArea = 1.0; // 种植面积 (m²)
+
+    // 执行器状态（数据线程通过 applyCommand 更新）
+    bool m_ledOn    = false;
+    bool m_pumpOn   = false;
+    bool m_buzzerOn = false;
 
     // 手动指令队列
     static std::queue<char> s_cmdQueue;

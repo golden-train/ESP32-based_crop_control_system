@@ -61,47 +61,49 @@ std::string SerialDispatcher::waitResponse(int timeoutMs)
 
 void SerialDispatcher::readerLoop(HANDLE serialHandle)
 {
+    char buf[256];
+    std::string line;
+
     while (m_running)
     {
-        // 逐字节读取，直到获得完整一行
-        char ch;
         DWORD bytesRead = 0;
-        std::string line;
-
-        while (m_running)
+        if (ReadFile(serialHandle, buf, sizeof(buf) - 1, &bytesRead, nullptr) && bytesRead > 0)
         {
-            if (ReadFile(serialHandle, &ch, 1, &bytesRead, nullptr) && bytesRead > 0)
+            for (DWORD i = 0; i < bytesRead; i++)
             {
+                char ch = buf[i];
                 if (ch == '\n')
                 {
                     if (!line.empty() && line.back() == '\r')
                         line.pop_back();
-                    break; // 读完一行
+
+                    if (line.empty())
+                        continue;
+
+                    // 分发
+                    if (m_expectingResponse)
+                    {
+                        std::lock_guard<std::mutex> lock(m_mutex);
+                        m_queue.push(std::move(line));
+                        m_cv.notify_one();
+                    }
+                    else
+                    {
+                        if (m_errorCallback)
+                            m_errorCallback(line);
+                    }
+                    line.clear();
                 }
-                line += ch;
+                else
+                {
+                    line += ch;
+                }
             }
-            else
-            {
-                // 暂无数据，短暂休眠后重试
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-        }
-
-        if (line.empty())
-            continue;
-
-        // 分发：主线程度在等待响应 → 放入队列由主线程消费
-        if (m_expectingResponse)
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_queue.push(std::move(line));
-            m_cv.notify_one();
         }
         else
         {
-            // 自发上传的错误数据 → 在读取线程中直接调用错误回调
-            if (m_errorCallback)
-                m_errorCallback(line);
+            // 无数据时短暂休眠，不空转
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     }
 }
