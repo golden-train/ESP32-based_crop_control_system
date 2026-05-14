@@ -44,6 +44,7 @@
                 "${workspaceFolder}/src/simulated_sensor.cpp",
                 "${workspaceFolder}/src/serial_dispatcher.cpp",
                 "${workspaceFolder}/src/data_logger.cpp",
+                "${workspaceFolder}/src/sensor_display.cpp",
                 "-o",
                 "${workspaceFolder}/src/output/system.exe",
                 "-LC:/tool/SFML-2.6.2/lib",

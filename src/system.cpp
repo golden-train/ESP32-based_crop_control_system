@@ -37,6 +37,9 @@ static std::atomic<bool> g_running{true};
 // 日志文件路径（相对于工作目录）
 static DataLogger *g_logger = nullptr;
 
+// 上次写入日志的时间（用于5分钟间隔判断）
+static auto g_lastLogTime = std::chrono::system_clock::time_point{};
+
 // SFML 显示指针（由主线程设置，数据线程只读）
 static SensorDisplay *g_display = nullptr;
 
@@ -57,10 +60,6 @@ static void processData(const SensorData &data)
               << u8"土壤: " << data.soilMoisture << u8"%  "
               << u8"光照: " << data.lightIntensity << u8"lux"
               << std::endl;
-
-    if (g_logger)
-        g_logger->log(data.temperature, data.humidity,
-                      data.soilMoisture, data.lightIntensity);
 
     if (g_display)
         g_display->updateData(data);
@@ -127,8 +126,8 @@ static void errorHandlerThread()
                           << std::endl;
 
                 if (g_logger)
-                    g_logger->log(data.temperature, data.humidity,
-                                  data.soilMoisture, data.lightIntensity);
+                    g_logger->logAnomaly(data.temperature, data.humidity,
+                                         data.soilMoisture, data.lightIntensity);
             }
             else
             {
@@ -199,6 +198,15 @@ static void runRealMode(SerialReader &reader)
         {
             processData(data);
 
+            // 每5分钟写入一次日志文件
+            auto _now = std::chrono::system_clock::now();
+            if (g_logger && _now - g_lastLogTime >= std::chrono::minutes(5))
+            {
+                g_logger->log(data.temperature, data.humidity,
+                              data.soilMoisture, data.lightIntensity);
+                g_lastLogTime = _now;
+            }
+
             std::vector<double> fileValues = readLatestFromLog("temp/sensor_log.txt");
             if (!fileValues.empty())
             {
@@ -241,7 +249,11 @@ static void runRealMode(SerialReader &reader)
                       << line << std::endl;
         }
 
-        std::this_thread::sleep_for(std::chrono::seconds(SAMPLE_INTERVAL_SEC));
+        // 有显示窗口 → 快速刷新；无显示窗口 → 降频保日志
+        if (g_display && g_display->isOpen())
+            std::this_thread::sleep_for(std::chrono::seconds(SAMPLE_INTERVAL_SEC));
+        else
+            std::this_thread::sleep_for(std::chrono::minutes(5));
 
         // 检查手动指令队列
         char manualCmd;
@@ -280,6 +292,15 @@ static void runDemoMode()
 
         SensorData data = SimulatedSensor::generate();
         processData(data);
+
+        // 每5分钟写入一次日志文件
+        auto _now = std::chrono::system_clock::now();
+        if (g_logger && _now - g_lastLogTime >= std::chrono::minutes(5))
+        {
+            g_logger->log(data.temperature, data.humidity,
+                          data.soilMoisture, data.lightIntensity);
+            g_lastLogTime = _now;
+        }
 
         {
             std::vector<double> fileValues = readLatestFromLog("temp/sensor_log.txt");
@@ -326,7 +347,11 @@ static void runDemoMode()
             g_errorCv.notify_one();
         }
 
-        std::this_thread::sleep_for(std::chrono::seconds(SAMPLE_INTERVAL_SEC));
+        // 有显示窗口 → 快速刷新；无显示窗口 → 降频保日志
+        if (g_display && g_display->isOpen())
+            std::this_thread::sleep_for(std::chrono::seconds(SAMPLE_INTERVAL_SEC));
+        else
+            std::this_thread::sleep_for(std::chrono::minutes(5));
 
         // 检查手动指令队列
         char manualCmd;

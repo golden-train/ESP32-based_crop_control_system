@@ -44,3 +44,26 @@ void DataLogger::log(double temperature, double humidity,
            << "光照: " << lightIntensity << "lux"
            << std::endl;
 }
+
+void DataLogger::logAnomaly(double temperature, double humidity,
+                            double soilMoisture, double lightIntensity)
+{
+    auto now = std::chrono::system_clock::now();
+    auto t = std::chrono::system_clock::to_time_t(now);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  now.time_since_epoch()) % 1000;
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    if (!m_file.is_open())
+        return;
+
+    m_file << "[" << std::put_time(std::localtime(&t), "%Y-%m-%d %H:%M:%S")
+           << "." << std::setfill('0') << std::setw(3) << ms.count() << "]  "
+           << "[异常] "
+           << "温度: " << temperature << "℃  "
+           << "湿度: " << humidity << "%  "
+           << "土壤: " << soilMoisture << "%  "
+           << "光照: " << lightIntensity << "lux"
+           << std::endl;
+}

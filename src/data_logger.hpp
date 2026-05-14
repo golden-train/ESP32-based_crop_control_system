@@ -16,6 +16,10 @@ public:
     void log(double temperature, double humidity,
              double soilMoisture, double lightIntensity);
 
+    // 追加异常数据记录：与 log() 格式相同，但行中标记 [异常]
+    void logAnomaly(double temperature, double humidity,
+                    double soilMoisture, double lightIntensity);
+
 private:
     std::ofstream m_file;
     std::mutex m_mutex;
