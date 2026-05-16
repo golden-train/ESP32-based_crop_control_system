@@ -1,0 +1,15 @@
+[Unit]
+Description=ESP32 Sensor Data Server Logger Service
+After=network.target mosquitto.service
+Wants=mosquitto.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/esp32-server/server_logger.py --mqtt-host 127.0.0.1
+WorkingDirectory=/opt/esp32-server
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

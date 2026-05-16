@@ -1,17 +1,17 @@
 // ESP32 传感器数据监控系统
-// 从 COM6 串口读取环境温度、湿度、土壤湿度、光照强度
-// 未连接开发板时自动切换为模拟演示模式
+// 数据来源：服务端（首选）→ MQTT → 串口 COM6 → 退出
 //
 // 多线程架构：
 //   主线程    —— SFML 事件循环 + 渲染仪表盘
-//   数据线程  —— 定频发送 "0" 触发采集，处理正常数据
+//   数据线程  —— 服务端/MQTT/串口数据接收 + 分析处理
 //   读取线程  —— 持续监听串口，区分正常响应 / 自发错误上报
 //   错误线程  —— 处理 ESP32 自发上传的错误数据
 #include "serial_reader.hpp"
 #include "serial_dispatcher.hpp"
+#include "mqtt_client.hpp"
+#include "server_client.hpp"
 #include "number_parser.hpp"
 #include "sensor_data.hpp"
-#include "simulated_sensor.hpp"
 #include "data_logger.hpp"
 #include "analysis_rules.hpp"
 #include "sensor_display.hpp"
@@ -23,6 +23,7 @@
 #include <queue>
 #include <mutex>
 #include <condition_variable>
+#include <sstream>
 
 // 采样间隔（秒）：每隔此时间发一次 "0" 触发 ESP32 采集
 // ★ 必须与 ESP32 端 HEARTBEAT_MS 保持一致 ★
@@ -44,6 +45,9 @@ static SensorDisplay *g_display = nullptr;
 
 // 共享分析规则实例（数据线程内持久）
 static AnalysisRules *g_rules = nullptr;
+
+// MQTT 客户端指针（数据线程内持久）
+static MqttClient *g_mqtt = nullptr;
 
 // 输出一行到控制台 + SFML 日志区
 static void logMessage(const std::string &msg)
@@ -80,6 +84,29 @@ static bool tryParseSensorData(const std::string &line, SensorData &outData)
         return true;
     }
     return false;
+}
+
+// 从服务端日志行解析传感器数据
+// 格式: "[2026-05-14 10:00:00] 25.3 55.1 42.0 813"
+// 格式: "[2026-05-14 10:00:03][ANOMALY] 25.3 55.1 42.0 813"
+static bool parseLogLine(const std::string &line, SensorData &outData)
+{
+    size_t bracketEnd = line.rfind(']');
+    if (bracketEnd == std::string::npos)
+        return tryParseSensorData(line, outData);
+    std::string rest = line.substr(bracketEnd + 1);
+    return tryParseSensorData(rest, outData);
+}
+
+// 生成 ISO 格式时间字符串（用于服务端日志查询）
+static std::string toIsoString(const std::chrono::system_clock::time_point &tp)
+{
+    auto t = std::chrono::system_clock::to_time_t(tp);
+    std::tm tm;
+    localtime_s(&tm, &t);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &tm);
+    return buf;
 }
 
 // 将指令字符转为中文标签
@@ -124,6 +151,10 @@ static void runAnalysisPoint(SensorData &data, SerialReader *reader)
         {
             bool err = false;
             reader->writeText(std::string(1, cmd), err);
+        }
+        else if (g_mqtt && g_mqtt->isRunning())
+        {
+            g_mqtt->publish("esp32/cmd", std::string(1, cmd));
         }
         if (g_display)
             g_display->applyCommand(cmd);
@@ -183,10 +214,16 @@ static void processManualCommands(SerialReader *reader)
             logMessage(std::string(u8"[手动] 发送指令 ") + manualCmd +
                        u8" → " + cmdLabel(manualCmd));
         }
+        else if (g_mqtt && g_mqtt->isRunning())
+        {
+            g_mqtt->publish("esp32/cmd", std::string(1, manualCmd));
+            logMessage(std::string(u8"[手动] MQTT指令 ") + manualCmd +
+                       u8" → " + cmdLabel(manualCmd));
+        }
         else
         {
             logMessage(std::string(u8"[手动] 指令 ") + manualCmd +
-                       u8" → " + cmdLabel(manualCmd) + u8"（演示模式）");
+                       u8" → " + cmdLabel(manualCmd) + u8"（无连接）");
         }
     }
 }
@@ -321,14 +358,12 @@ static void runRealMode(SerialReader &reader)
         errorThread.join();
 }
 
-// 模拟演示模式（运行在数据线程中）
-static void runDemoMode()
+// MQTT 数据接收模式（运行在数据线程中）
+static void runMqttMode()
 {
-    logMessage(u8"【演示模式】串口 COM6 不可用，使用模拟数据");
-    logMessage(std::string(u8"采样间隔 ") +
-               std::to_string(SAMPLE_INTERVAL_SEC) + u8" 秒，关闭窗口退出");
+    logMessage(u8"【MQTT 模式】连接到 8.137.48.225");
 
-    if (g_display) g_display->setConnected(false);
+    if (g_display) g_display->setConnected(true);
 
     DataLogger logger("temp/sensor_log.txt");
     g_logger = &logger;
@@ -336,46 +371,191 @@ static void runDemoMode()
     AnalysisRules rules;
     g_rules = &rules;
 
+    MqttClient mqtt;
+    g_mqtt = &mqtt;
+
+    if (!mqtt.begin("8.137.48.225", 1883, "pc", "20061001"))
+    {
+        logMessage(u8"[错误] MQTT 连接失败");
+        g_mqtt = nullptr;
+        return;
+    }
+
     std::thread errorThread(errorHandlerThread);
+
+    mqtt.setMessageCallback([&](const std::string &topic, const std::string &payload) {
+        if (topic == "esp32/data")
+        {
+            SensorData data;
+            if (tryParseSensorData(payload, data))
+            {
+                processData(data);
+                auto _now = std::chrono::system_clock::now();
+                if (_now - g_lastLogTime >= std::chrono::minutes(5))
+                    runAnalysisPoint(data, nullptr);
+            }
+        }
+        else if (topic == "esp32/alert")
+        {
+            std::string cleanPayload = payload;
+            if (!cleanPayload.empty() && cleanPayload[0] == '!')
+                cleanPayload = cleanPayload.substr(1);
+            SensorData data;
+            if (tryParseSensorData(cleanPayload, data))
+            {
+                std::cout << u8"[异常上报] "
+                          << u8"温度: " << data.temperature << u8"℃  "
+                          << u8"湿度: " << data.humidity << u8"%  "
+                          << u8"土壤: " << data.soilMoisture << u8"%  "
+                          << u8"光照: " << data.lightIntensity << u8"lux"
+                          << std::endl;
+                if (g_logger)
+                    g_logger->logAnomaly(data.temperature, data.humidity,
+                                         data.soilMoisture, data.lightIntensity);
+            }
+            else
+                logMessage(std::string(u8"[异常上报] ") + payload);
+        }
+    });
 
     while (g_running)
     {
-        // 演示模式：生成模拟数据
-        SensorData data = SimulatedSensor::generate();
-        processData(data);
-
-        // 每 5 分钟：分析点
-        auto _now = std::chrono::system_clock::now();
-        if (_now - g_lastLogTime >= std::chrono::minutes(5))
-            runAnalysisPoint(data, nullptr); // nullptr = 无串口，仅日志
-
-        // 模拟异常上报（每 5 次）
-        static int counter = 0;
-        if (++counter % 5 == 0)
+        char manualCmd;
+        while (SensorDisplay::popCommand(manualCmd))
         {
-            std::string fakeError = "ERR_TEMP_HIGH 38.5 60.0 42.0 800";
-            logMessage(std::string(u8"[模拟异常上报] ") + fakeError);
+            if (manualCmd == '8' && g_rules)
             {
-                std::lock_guard<std::mutex> lock(g_mutex);
-                g_errorQueue.push(fakeError);
+                g_rules->clearAlarm();
+                logMessage(u8"[手动] 清除温度报警（指令 8）");
             }
-            g_errorCv.notify_one();
+            if (g_display) g_display->applyCommand(manualCmd);
+            mqtt.publish("esp32/cmd", std::string(1, manualCmd));
+            logMessage(std::string(u8"[手动] MQTT指令 ") + manualCmd +
+                       u8" → " + cmdLabel(manualCmd));
         }
-
-        // 条件休眠
-        if (g_display && g_display->isOpen())
-            std::this_thread::sleep_for(std::chrono::seconds(SAMPLE_INTERVAL_SEC));
-        else
-            std::this_thread::sleep_for(std::chrono::minutes(5));
-
-        // 检查手动指令队列
-        processManualCommands(nullptr);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
+    mqtt.end();
     g_running = false;
     g_errorCv.notify_all();
     if (errorThread.joinable())
         errorThread.join();
+}
+
+// 服务端模式（运行在数据线程中）
+// 长连接接收实时数据，断开后自动重连
+static void runServerMode()
+{
+    logMessage(u8"【服务端模式】连接到 8.137.48.225:9090");
+
+    if (g_display) g_display->setConnected(true);
+
+    DataLogger logger("temp/sensor_log.txt");
+    g_logger = &logger;
+
+    AnalysisRules rules;
+    g_rules = &rules;
+
+    auto lastAnalysisTime = std::chrono::system_clock::now();
+
+    while (g_running)
+    {
+        ServerClient sclient;
+        if (!sclient.connect("8.137.48.225", 9090))
+        {
+            logMessage(u8"[警告] 服务端连接失败，5 秒后重试...");
+            for (int i = 0; i < 50 && g_running; i++)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+
+        sclient.setDataCallback([](const SensorData &data) {
+            processData(data);
+        });
+        sclient.setAlertCallback([](const std::string &alert) {
+            std::cout << u8"[异常上报] " << alert << std::endl;
+            SensorData data;
+            std::string clean = alert;
+            if (!clean.empty() && clean[0] == '!')
+                clean = clean.substr(1);
+            if (tryParseSensorData(clean, data) && g_logger)
+                g_logger->logAnomaly(data.temperature, data.humidity,
+                                     data.soilMoisture, data.lightIntensity);
+        });
+
+        while (g_running && sclient.isConnected())
+        {
+            auto now = std::chrono::system_clock::now();
+
+            if (now - lastAnalysisTime >= std::chrono::seconds(30))
+            {
+                std::string beginStr = toIsoString(lastAnalysisTime);
+                std::string endStr   = toIsoString(now);
+
+                std::vector<std::string> logLines;
+                if (sclient.fetchLogs(beginStr, endStr, logLines) && !logLines.empty())
+                {
+                    logMessage(std::string(u8"[分析] 拉取到 ") +
+                               std::to_string(logLines.size()) + u8" 条新日志");
+                    for (const auto &line : logLines)
+                    {
+                        if (line.find("[ANOMALY]") != std::string::npos) continue;
+                        SensorData data;
+                        if (parseLogLine(line, data))
+                        {
+                            if (g_display)
+                            {
+                                AnalysisConfig cfg = rules.getConfig();
+                                cfg.growingArea = g_display->getGrowingArea();
+                                rules.updateConfig(cfg);
+                            }
+                            rules.feedDataPoint(data);
+                            auto cmds = rules.checkUrgent();
+                            for (char cmd : cmds)
+                            {
+                                sclient.sendCommand(std::string(1, cmd));
+                                if (g_display) g_display->applyCommand(cmd);
+                                logMessage(std::string(u8"[分析] 指令 ") + cmd + u8" → " + cmdLabel(cmd));
+                            }
+                            if (g_display)
+                                g_display->setAnalysisData(
+                                    rules.totalWaterUsed(), rules.tempAlarmActive(),
+                                    rules.avgPpfd(), rules.currentDli(),
+                                    rules.avgTemperature(), rules.isIrrigating(),
+                                    rules.dataPointCount());
+                            logMessage(std::string(u8"[分析] 数据点 #") +
+                                       std::to_string(rules.dataPointCount()) + u8" | 平均温度: " +
+                                       std::to_string(rules.avgTemperature()).substr(0, 4) + u8"℃" +
+                                       u8" | 用水量: " + std::to_string(rules.totalWaterUsed()).substr(0, 4) + u8"L" +
+                                       (rules.tempAlarmActive() ? u8" | ⚠ 温度报警" : u8""));
+                        }
+                    }
+                }
+                lastAnalysisTime = now;
+            }
+
+            char manualCmd;
+            while (SensorDisplay::popCommand(manualCmd))
+            {
+                if (manualCmd == '8' && g_rules)
+                {
+                    g_rules->clearAlarm();
+                    logMessage(u8"[手动] 清除温度报警（指令 8）");
+                }
+                if (g_display) g_display->applyCommand(manualCmd);
+                sclient.sendCommand(std::string(1, manualCmd));
+                logMessage(std::string(u8"[手动] 服务端指令 ") + manualCmd +
+                           u8" → " + cmdLabel(manualCmd));
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        sclient.disconnect();
+        for (int i = 0; i < 50 && g_running; i++)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
 }
 
 int main()
@@ -394,13 +574,16 @@ int main()
     g_display = &display;
 
     SerialReader reader;
-    bool realMode = reader.open("COM6", 115200);
 
-    std::thread dataThread([realMode, &reader]() {
-        if (realMode)
-            runRealMode(reader);
-        else
-            runDemoMode();
+    std::thread dataThread([&reader]() {
+        runServerMode();
+        if (!g_running) return;
+        runMqttMode();
+        if (!g_running) return;
+        runRealMode(reader);
+        if (!g_running) return;
+        logMessage(u8"[错误] 所有数据源均不可用，程序退出");
+        g_running = false;
     });
 
     while (display.isOpen() && g_running)

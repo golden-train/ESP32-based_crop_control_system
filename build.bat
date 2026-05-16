@@ -7,7 +7,7 @@ set OUT=src\output
 set SFML=C:\tool\SFML-2.6.2
 set CXX=g++
 set "CXXFLAGS=-std=c++17 -O2 -finput-charset=UTF-8 -fexec-charset=UTF-8 -I%SFML%/include -I%SRC%"
-set "LDFLAGS=-L%SFML%/lib -lsfml-graphics -lsfml-window -lsfml-system"
+set "LDFLAGS=-L%SFML%/lib -lsfml-graphics -lsfml-window -lsfml-system -lopengl32 -lgdi32 -lwinmm -lws2_32"
 
 if not exist "%OUT%" mkdir "%OUT%"
 
@@ -34,4 +34,3 @@ copy "%SFML%\bin\sfml-window-2.dll"   "%OUT%\" >NUL
 copy "%SFML%\bin\sfml-system-2.dll"   "%OUT%\" >NUL
 
 echo ^=^=^> DONE: %OUT%\system.exe
-//this is a test
