@@ -87,8 +87,8 @@ void ServerClient::disconnect()
 {
     m_running = false;
     m_connected = false;
-    if (m_heartbeatThread.joinable()) m_heartbeatThread.join();
-    if (m_recvThread.joinable()) m_recvThread.join();
+
+    // 先关闭 socket 让 recv 立即返回，再 join 线程避免阻塞
     {
         std::lock_guard<std::mutex> lock(m_sockMutex);
         if (m_sock >= 0)
@@ -98,6 +98,9 @@ void ServerClient::disconnect()
             m_sock = -1;
         }
     }
+
+    if (m_heartbeatThread.joinable()) m_heartbeatThread.join();
+    if (m_recvThread.joinable()) m_recvThread.join();
 }
 
 // ============================================================ //
@@ -229,4 +232,34 @@ bool ServerClient::fetchLogs(const std::string &begin, const std::string &end,
 bool ServerClient::sendCommand(const std::string &cmd)
 {
     return sendLine("CMD:" + cmd);
+}
+
+bool ServerClient::sendQuickCmd(const std::string &host, int port,
+                                const std::string &cmd)
+{
+    if (!ensureWsa()) return false;
+    SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s == INVALID_SOCKET) return false;
+
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    struct hostent *he = gethostbyname(host.c_str());
+    if (!he) { closesocket(s); return false; }
+    memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
+
+    // 3 秒超时，避免卡死
+    int timeout = 3000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
+
+    if (::connect(s, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+    { closesocket(s); return false; }
+
+    // 发送 CMD:x 后等待 200ms 让 TCP 传输完成再关闭
+    std::string req = "CMD:" + cmd + "\n";
+    ::send(s, req.c_str(), (int)req.size(), 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    closesocket(s);
+    return true;
 }

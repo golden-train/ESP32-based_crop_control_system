@@ -27,6 +27,11 @@ public:
     ~SensorDisplay();
 
     void updateData(const SensorData &data);
+
+    // 批量替换全部历史数据（用于从服务端日志重建折线图）
+    void setHistory(const std::deque<double> &temp,
+                    const std::deque<double> &soil,
+                    const std::deque<double> &light);
     void addLog(const std::string &msg);
     void setConnected(bool connected);
     bool processEvents();

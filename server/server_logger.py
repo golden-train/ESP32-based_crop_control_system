@@ -286,8 +286,12 @@ def handle_pc_client(client_sock):
                             client_sock.sendall(resp.encode("utf-8"))
                         except: pass
                     return  # 临时查询结束
-                # 其他未知命令也按临时查询处理
-                # 但先不管，循环继续等数据
+                elif line.startswith("CMD:"):
+                    # 临时连接发来的指令：直接执行并关闭
+                    cmd = line[4:]
+                    print(f"[TCP] PC 指令(临时): {cmd}")
+                    mqtt_client.publish("esp32/cmd", cmd)
+                    return
 
         if not found_connect:
             return  # 没收到 CONNECT，直接关闭

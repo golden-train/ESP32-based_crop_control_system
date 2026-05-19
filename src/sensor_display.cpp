@@ -77,6 +77,16 @@ void SensorDisplay::updateData(const SensorData &data)
     if (m_lightHistory.size() > HISTORY_SIZE) m_lightHistory.pop_front();
 }
 
+void SensorDisplay::setHistory(const std::deque<double> &temp,
+                                const std::deque<double> &soil,
+                                const std::deque<double> &light)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_tempHistory = temp;
+    m_soilHistory = soil;
+    m_lightHistory = light;
+}
+
 void SensorDisplay::addLog(const std::string &msg)
 {
     std::lock_guard<std::mutex> lock(m_mutex);

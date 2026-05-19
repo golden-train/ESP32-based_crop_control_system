@@ -6,10 +6,20 @@ set SRC=src
 set OUT=src\output
 set SFML=C:\tool\SFML-2.6.2
 set CXX=g++
-set "CXXFLAGS=-std=c++17 -O2 -finput-charset=UTF-8 -fexec-charset=UTF-8 -I%SFML%/include -I%SRC%"
+set "CXXFLAGS=-std=c++17 -O2 -finput-charset=UTF-8 -fexec-charset=UTF-8 -I%SFML%/include -I%SRC% -Wno-cpp"
 set "LDFLAGS=-L%SFML%/lib -lsfml-graphics -lsfml-window -lsfml-system -lopengl32 -lgdi32 -lwinmm -lws2_32"
 
+REM 先杀掉残留的 system.exe（避免链接器无法覆盖）
+tasklist /FI "IMAGENAME eq system.exe" 2>NUL | find /I "system.exe" >NUL
+if not errorlevel 1 (
+    taskkill /f /im system.exe >NUL 2>&1
+    timeout /t 1 /nobreak >NUL
+)
+
 if not exist "%OUT%" mkdir "%OUT%"
+
+REM 清理旧的中间文件
+del /Q "%OUT%\*.o" "%OUT%\system.exe" 2>NUL
 
 echo ^=^=^> Compiling all source files...
 for %%f in ("%SRC%\*.cpp") do (

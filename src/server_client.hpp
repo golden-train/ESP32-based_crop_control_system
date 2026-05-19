@@ -36,6 +36,10 @@ public:
     // 发送控制指令到 ESP32
     bool sendCommand(const std::string &cmd);
 
+    // 极简指令发送：临时连接→发CMD→等200ms→关闭，无线程无心跳
+    static bool sendQuickCmd(const std::string &host, int port,
+                             const std::string &cmd);
+
     // 同步查询历史日志（临时独立连接）
     bool fetchLogs(const std::string &begin, const std::string &end,
                    std::vector<std::string> &outLines);

@@ -15,6 +15,8 @@
 #include "data_logger.hpp"
 #include "analysis_rules.hpp"
 #include "sensor_display.hpp"
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
 #include <windows.h>
 #include <iostream>
 #include <fstream>
@@ -24,6 +26,9 @@
 #include <mutex>
 #include <condition_variable>
 #include <sstream>
+
+// Winsock 初始化（全局执行一次）
+static struct WsaInit { WsaInit() { WSADATA d; WSAStartup(MAKEWORD(2,2), &d); } } s_wsa;
 
 // 采样间隔（秒）：每隔此时间发一次 "0" 触发 ESP32 采集
 // ★ 必须与 ESP32 端 HEARTBEAT_MS 保持一致 ★
@@ -443,11 +448,39 @@ static void runMqttMode()
         errorThread.join();
 }
 
+// 极简 TCP 指令发送：Winsock 直接发 CMD:x，无对象无线程
+static bool sendCmdRaw(const std::string &host, int port, char cmd)
+{
+    SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s == INVALID_SOCKET) return false;
+
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((u_short)port);
+    struct hostent *he = gethostbyname(host.c_str());
+    if (!he) { closesocket(s); return false; }
+    memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
+
+    // 3 秒连接超时
+    int timeout = 3000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
+
+    if (::connect(s, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+    { closesocket(s); return false; }
+
+    std::string msg = std::string("CMD:") + cmd + "\n";
+    ::send(s, msg.c_str(), (int)msg.size(), 0);
+    Sleep(200);  // 等待 TCP 数据发送完成
+    closesocket(s);
+    return true;
+}
+
 // 服务端模式（运行在数据线程中）
-// 长连接接收实时数据，断开后自动重连
+// 直接从服务端下载日志文件进行分析，不再依赖长连接推送
 static void runServerMode()
 {
-    logMessage(u8"【服务端模式】连接到 8.137.48.225:9090");
+    logMessage(u8"【服务端模式】8.137.48.225:9090");
 
     if (g_display) g_display->setConnected(true);
 
@@ -457,47 +490,59 @@ static void runServerMode()
     AnalysisRules rules;
     g_rules = &rules;
 
-    auto lastAnalysisTime = std::chrono::system_clock::now();
+    // 设为 60 秒前，让首次循环立即触发下载
+    auto lastAnalysisTime = std::chrono::system_clock::now() - std::chrono::seconds(60);
 
     while (g_running)
     {
-        ServerClient sclient;
-        if (!sclient.connect("8.137.48.225", 9090))
+        auto now = std::chrono::system_clock::now();
+
+        // 每 60 秒下载日志并分析（服务端每 5 分钟才写一条新日志）
+        if (now - lastAnalysisTime >= std::chrono::seconds(60))
         {
-            logMessage(u8"[警告] 服务端连接失败，5 秒后重试...");
-            for (int i = 0; i < 50 && g_running; i++)
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            continue;
-        }
+            lastAnalysisTime = now;
 
-        sclient.setDataCallback([](const SensorData &data) {
-            processData(data);
-        });
-        sclient.setAlertCallback([](const std::string &alert) {
-            std::cout << u8"[异常上报] " << alert << std::endl;
-            SensorData data;
-            std::string clean = alert;
-            if (!clean.empty() && clean[0] == '!')
-                clean = clean.substr(1);
-            if (tryParseSensorData(clean, data) && g_logger)
-                g_logger->logAnomaly(data.temperature, data.humidity,
-                                     data.soilMoisture, data.lightIntensity);
-        });
-
-        while (g_running && sclient.isConnected())
-        {
-            auto now = std::chrono::system_clock::now();
-
-            if (now - lastAnalysisTime >= std::chrono::seconds(30))
+            std::vector<std::string> logLines;
+            // 每次创建临时连接下载当日日志（当日 00:00:00 → 现在）
+            std::time_t t_now = std::chrono::system_clock::to_time_t(now);
+            std::tm tm_now;
+            localtime_s(&tm_now, &t_now);
+            tm_now.tm_hour = 0; tm_now.tm_min = 0; tm_now.tm_sec = 0;
+            auto dayBegin = std::chrono::system_clock::from_time_t(std::mktime(&tm_now));
+            ServerClient fetcher;
+            if (fetcher.connect("8.137.48.225", 9090) &&
+                fetcher.fetchLogs(toIsoString(dayBegin),
+                                  toIsoString(now), logLines))
             {
-                std::string beginStr = toIsoString(lastAnalysisTime);
-                std::string endStr   = toIsoString(now);
-
-                std::vector<std::string> logLines;
-                if (sclient.fetchLogs(beginStr, endStr, logLines) && !logLines.empty())
+                if (!logLines.empty())
                 {
-                    logMessage(std::string(u8"[分析] 拉取到 ") +
-                               std::to_string(logLines.size()) + u8" 条新日志");
+                    logMessage(std::string(u8"[分析] 下载到 ") +
+                               std::to_string(logLines.size()) + u8" 条日志");
+
+                    // === 第一步：更新图表（放在分析之前，避免 for 循环问题） ===
+                    std::deque<double> tHist, sHist, lHist;
+                    SensorData latestData;
+                    for (const auto &line : logLines)
+                    {
+                        if (line.find("[ANOMALY]") != std::string::npos) continue;
+                        SensorData d;
+                        if (parseLogLine(line, d))
+                        {
+                            tHist.push_back(d.temperature);
+                            sHist.push_back(d.soilMoisture);
+                            lHist.push_back(d.lightIntensity);
+                            latestData = d;
+                        }
+                    }
+                    if (g_display && !tHist.empty())
+                    {
+                        g_display->setHistory(tHist, sHist, lHist);
+                        g_display->updateData(latestData);
+                        logMessage(std::string(u8"[图表] 历史 ") +
+                                   std::to_string(tHist.size()) + u8" 条");
+                    }
+
+                    // === 第二步：逐条分析（可能耗时但图表已更新，不影响） ===
                     for (const auto &line : logLines)
                     {
                         if (line.find("[ANOMALY]") != std::string::npos) continue;
@@ -514,7 +559,7 @@ static void runServerMode()
                             auto cmds = rules.checkUrgent();
                             for (char cmd : cmds)
                             {
-                                sclient.sendCommand(std::string(1, cmd));
+                                sendCmdRaw("8.137.48.225", 9090, cmd);
                                 if (g_display) g_display->applyCommand(cmd);
                                 logMessage(std::string(u8"[分析] 指令 ") + cmd + u8" → " + cmdLabel(cmd));
                             }
@@ -524,37 +569,15 @@ static void runServerMode()
                                     rules.avgPpfd(), rules.currentDli(),
                                     rules.avgTemperature(), rules.isIrrigating(),
                                     rules.dataPointCount());
-                            logMessage(std::string(u8"[分析] 数据点 #") +
-                                       std::to_string(rules.dataPointCount()) + u8" | 平均温度: " +
-                                       std::to_string(rules.avgTemperature()).substr(0, 4) + u8"℃" +
-                                       u8" | 用水量: " + std::to_string(rules.totalWaterUsed()).substr(0, 4) + u8"L" +
-                                       (rules.tempAlarmActive() ? u8" | ⚠ 温度报警" : u8""));
                         }
                     }
                 }
-                lastAnalysisTime = now;
             }
-
-            char manualCmd;
-            while (SensorDisplay::popCommand(manualCmd))
-            {
-                if (manualCmd == '8' && g_rules)
-                {
-                    g_rules->clearAlarm();
-                    logMessage(u8"[手动] 清除温度报警（指令 8）");
-                }
-                if (g_display) g_display->applyCommand(manualCmd);
-                sclient.sendCommand(std::string(1, manualCmd));
-                logMessage(std::string(u8"[手动] 服务端指令 ") + manualCmd +
-                           u8" → " + cmdLabel(manualCmd));
-            }
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            fetcher.disconnect();
         }
 
-        sclient.disconnect();
-        for (int i = 0; i < 50 && g_running; i++)
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // 手动指令已移至 UI 主循环处理（数据线程不再处理，避免竞争）
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }
 
@@ -590,6 +613,19 @@ int main()
     {
         display.processEvents();
         display.render();
+
+        // UI 线程直接处理手动指令（不依赖数据线程，响应更快）
+        // UI 线程处理手动指令（唯一处理者，无竞争）
+        char c;
+        while (SensorDisplay::popCommand(c))
+        {
+            if (c == '8' && g_rules) g_rules->clearAlarm();
+            if (g_display) g_display->applyCommand(c);
+            bool ok = sendCmdRaw("8.137.48.225", 9090, c);
+            logMessage(std::string(u8"[手动] ") + (ok ? u8"服务端指令 " : u8"发送失败 ") +
+                       c + u8" → " + cmdLabel(c));
+        }
+
         std::this_thread::sleep_for(std::chrono::milliseconds(16));
     }
 
