@@ -1,57 +1,135 @@
 #include "analysis_rules.hpp"
-#include <algorithm>
-#include <cmath>
+#include <math.h>
 
-// 分析逻辑改造方案v4 — 详见计划文档
+/*
+ * ── 阈值配置 ─────────────────────────────────────────────
+ * 这些静态常量是硬编码的安全阈值，不可通过 UI 修改。
+ * TEMP_RELEASE 是温度回落的迟滞值——必须回落到此值以下
+ * 且收到 '8' 指令后才能清除报警，防止频繁开关蜂鸣器。
+ */
+static const double TEMP_MAX     = 35.0;     /* 温度超限报警阈值 (°C) */
+static const double TEMP_RELEASE = 30.0;     /* 温度释放迟滞值 (°C) */
+static const double TREND_DELTA  = 0.5;      /* 趋势判断最小差值 (°C) */
+static const int    TREND_COUNT  = 4;        /* 连续趋势报警次数 */
 
-// 温度超限阈值 (°C)
-static constexpr double TEMP_MAX     = 35.0;
-// 温度释放迟滞 (°C) — 回落到此值以下才允许恢复灌溉
-static constexpr double TEMP_RELEASE = 30.0;
-// 趋势判断：后半段均值比前半段高出的最小差值 (°C)
-static constexpr double TREND_DELTA  = 0.5;
-// 触发趋势报警的连续检测次数
-static constexpr int    TREND_COUNT  = 3;
+static const double SOIL_DRY     = 20.0;     /* 土壤干阈值：低于此值开灌溉 (%) */
+static const double SOIL_WET     = 65.0;     /* 土壤湿阈值：高于此值关灌溉 (%) */
 
-// 土壤湿度阈值 (%)
-static constexpr double SOIL_DRY     = 30.0;  // 低于此值开启灌溉
-static constexpr double SOIL_WET     = 65.0;  // 高于此值关闭灌溉
+/*
+ * ============================================================
+ *                     环形缓冲区操作
+ * ============================================================
+ *
+ * 使用 RING_MAX (500) 大小的定长数组实现 FIFO 队列。
+ * head 指向最旧元素，tail 指向下一个写入位置。
+ * 满时覆盖最旧元素（适合滑动窗口统计），无需动态内存分配。
+ */
 
-// PAR 默认阈值 (μmol/m²/s) — 可通过 AnalysisConfig 覆盖
-static constexpr double PAR_MIN_DEF  = 100.0;
-static constexpr double PAR_MAX_DEF  = 200.0;
-
-AnalysisRules::AnalysisRules() = default;
-
-// ── 存入一个数据点 ──────────────────────────────────────────
-void AnalysisRules::feedDataPoint(const SensorData &data)
+/* 尾端推入：满则覆盖头部最旧数据 */
+static void ringPush(RingBuffer* rb, double val)
 {
-    m_tempHistory.push_back(data.temperature);
-    m_soilHistory.push_back(data.soilMoisture);
-    m_lightHistory.push_back(data.lightIntensity);
-
-    if (m_tempHistory.size() > MAX_HISTORY)  m_tempHistory.pop_front();
-    if (m_soilHistory.size() > MAX_HISTORY)  m_soilHistory.pop_front();
-    if (m_lightHistory.size() > MAX_HISTORY) m_lightHistory.pop_front();
-
-    // PAR 累计
-    std::lock_guard<std::mutex> lock(m_configMutex);
-    double ppfd = data.lightIntensity * m_config.parCoeff;
-    m_ppfdSum += ppfd;
-    m_lightSum += data.lightIntensity;
-    m_dataPointCount++;
+    if (rb->count >= RING_MAX)
+    {
+        rb->head = (rb->head + 1) % RING_MAX;
+        rb->count--;
+    }
+    rb->data[rb->tail] = val;
+    rb->tail = (rb->tail + 1) % RING_MAX;
+    rb->count++;
 }
 
-// ── 趋势检测 ────────────────────────────────────────────────
-bool AnalysisRules::detectRisingTrend()
-{
-    size_t n = m_tempHistory.size();
-    if (n < 6) return false; // 数据太少，判断无意义
+static int ringSize(const RingBuffer* rb) { return rb->count; }
 
-    size_t mid = n / 2;
+/* 相对索引访问：idx=0 返回头部（最旧），idx=count-1 返回尾部（最新） */
+static double ringAt(const RingBuffer* rb, int idx)
+{
+    return rb->data[(rb->head + idx) % RING_MAX];
+}
+
+/* 全部元素求平均 */
+static double ringAvg(const RingBuffer* rb)
+{
+    if (rb->count == 0) return 0;
+    double sum = 0;
+    for (int i = 0; i < rb->count; i++)
+        sum += ringAt(rb, i);
+    return sum / rb->count;
+}
+
+/*
+ * ============================================================
+ *                     AnalysisRules 实现
+ * ============================================================
+ */
+
+/* 初始化所有字段为默认值 */
+void AnalysisRules_init(AnalysisRules* rules)
+{
+    rules->tempHistory.head = rules->tempHistory.tail = rules->tempHistory.count = 0;
+    rules->soilHistory.head = rules->soilHistory.tail = rules->soilHistory.count = 0;
+    rules->lightHistory.head = rules->lightHistory.tail = rules->lightHistory.count = 0;
+
+    rules->risingCount       = 0;
+    rules->trendAlarmActive  = 0;
+    rules->trendAlarmSent    = 0;
+
+    rules->ppfdSum           = 0;
+    rules->lightSum          = 0;
+    rules->dataPointCount    = 0;
+
+    rules->irrigating        = 0;
+    rules->irrigateStartMs   = 0;
+    rules->totalWaterUsed    = 0;
+
+    rules->tempAlarmActive   = 0;
+    rules->tempAlarmSent     = 0;
+
+    /* 分析配置默认值（占位，用户可在 UI 手动修改） */
+    rules->config.growingArea  = 0.1;     /* 种植面积 1 m² */
+    rules->config.pumpFlowRate = 1.0;     /* 水泵流量 1 L/min */
+    rules->config.parCoeff     = 0.0185;  /* lux→PPFD 转换系数（需标定） */
+    rules->config.parMin       = 6.0;     /* PAR 不足阈值 */
+    rules->config.parMax       = 16.0;    /* PAR 充足阈值 */
+
+    InitializeCriticalSection(&rules->configMutex);
+}
+
+/*
+ * 存入一个数据点：三个传感器值分别写入对应的环形缓冲区，
+ * 同时累计 PPFD 和光照值用于全程平均计算。
+ */
+void AnalysisRules_feedDataPoint(AnalysisRules* rules, const SensorData* data)
+{
+    ringPush(&rules->tempHistory, data->temperature);
+    ringPush(&rules->soilHistory, data->soilMoisture);
+    ringPush(&rules->lightHistory, data->lightIntensity);
+
+    /* PPFD 累计需要读取 config.parCoeff，加锁保护 */
+    EnterCriticalSection(&rules->configMutex);
+    double ppfd = data->lightIntensity * rules->config.parCoeff;
+    rules->ppfdSum += ppfd;
+    rules->lightSum += data->lightIntensity;
+    rules->dataPointCount++;
+    LeaveCriticalSection(&rules->configMutex);
+}
+
+/*
+ * ── 趋势检测 ──────────────────────────────────────────────
+ * 将温度历史数据分为前后两半，比较均值差。
+ * 当后半段比前半段高出 TREND_DELTA (0.5°C) 时视为上升趋势。
+ * 至少需要 6 个数据点（30 分钟）才有统计意义。
+ */
+static int detectRisingTrend(AnalysisRules* rules)
+{
+    int n = ringSize(&rules->tempHistory);
+    if (n < 6) return 0;
+
+    int mid = n / 2;
     double sumFirst = 0, sumSecond = 0;
-    for (size_t i = 0; i < mid; ++i) sumFirst  += m_tempHistory[i];
-    for (size_t i = mid; i < n; ++i) sumSecond += m_tempHistory[i];
+    for (int i = 0; i < mid; i++)
+        sumFirst += ringAt(&rules->tempHistory, i);
+    for (int i = mid; i < n; i++)
+        sumSecond += ringAt(&rules->tempHistory, i);
 
     double avgFirst  = sumFirst  / mid;
     double avgSecond = sumSecond / (n - mid);
@@ -59,134 +137,165 @@ bool AnalysisRules::detectRisingTrend()
     return (avgSecond - avgFirst) > TREND_DELTA;
 }
 
-// ── 灌溉用水量计算 ──────────────────────────────────────────
-void AnalysisRules::accumulateWaterUsage()
+/*
+ * ── 灌溉用水量计算 ────────────────────────────────────────
+ * 用水量 = 流量 (L/min) × 时长 (分钟)。
+ * 时长用 GetTickCount64 计算（毫秒精度，不受系统时间调整影响）。
+ */
+static void accumulateWaterUsage(AnalysisRules* rules)
 {
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-        now - m_irrigateStart).count();
+    DWORD64 now = GetTickCount64();
+    double elapsedSec = (now - rules->irrigateStartMs) / 1000.0;
 
-    // 用水量 = 流量 (L/min) × 时长 (分钟)
-    std::lock_guard<std::mutex> lock(m_configMutex);
-    double minutes = elapsed / 60.0;
-    m_totalWaterUsed += m_config.pumpFlowRate * minutes;
+    EnterCriticalSection(&rules->configMutex);
+    double minutes = elapsedSec / 60.0;
+    rules->totalWaterUsed += rules->config.pumpFlowRate * minutes;
+    LeaveCriticalSection(&rules->configMutex);
 }
 
-// ── 主分析入口（每 5 分钟调用） ─────────────────────────────
-std::vector<char> AnalysisRules::checkUrgent()
+/*
+ * ── 主分析入口（每 5 分钟调用一次） ──────────────────────
+ *
+ * 执行顺序：
+ *   1. 趋势检测 → 连续 3 次上升则发蜂鸣器 '3'
+ *   2. PAR 计算 → PPFD 不足发补光 '1'，过高关闭 '5'
+ *   3. 温度阈值 → 超过 35°C 发蜂鸣器 '3'，设置温度互锁
+ *   4. 土壤湿度 → < 30% 且无温度互锁则开灌溉 '4'，> 65% 关闭 '6'
+ *
+ * 温度互锁逻辑：温度报警激活期间禁止灌溉（即使土壤干燥），
+ * 防止高温下灌溉对植物造成伤害。
+ *
+ * cmds 数组最多写入 maxCmds 个指令字符，返回实际写入了多少个。
+ */
+int AnalysisRules_checkUrgent(AnalysisRules* rules, char* cmds, int maxCmds)
 {
-    std::vector<char> cmds;
+    int cmdCount = 0;
+    if (rules->dataPointCount == 0) return 0;
 
-    if (m_dataPointCount == 0) return cmds;
+    /* 取最新一个数据点用于阈值判断 */
+    double temperature    = ringSize(&rules->tempHistory)  > 0
+                            ? ringAt(&rules->tempHistory, ringSize(&rules->tempHistory) - 1)
+                            : 0;
+    double soilMoisture   = ringSize(&rules->soilHistory)  > 0
+                            ? ringAt(&rules->soilHistory, ringSize(&rules->soilHistory) - 1)
+                            : 0;
+    double lightIntensity = ringSize(&rules->lightHistory) > 0
+                            ? ringAt(&rules->lightHistory, ringSize(&rules->lightHistory) - 1)
+                            : 0;
 
-    SensorData data;
+    /* ── 第 1 步：趋势检测 ────────────────── */
+    if (detectRisingTrend(rules))
     {
-        data.temperature    = m_tempHistory.empty()  ? 0 : m_tempHistory.back();
-        data.soilMoisture   = m_soilHistory.empty()  ? 0 : m_soilHistory.back();
-        data.lightIntensity = m_lightHistory.empty() ? 0 : m_lightHistory.back();
-    }
-
-    // 1. 趋势检测（用全部累计数据）
-    if (detectRisingTrend())
-    {
-        m_risingCount++;
-        if (m_risingCount >= TREND_COUNT && !m_trendAlarmSent)
+        rules->risingCount++;
+        if (rules->risingCount >= TREND_COUNT && !rules->trendAlarmSent)
         {
-            cmds.push_back('3');
-            m_trendAlarmSent = true;
+            if (cmdCount < maxCmds) cmds[cmdCount++] = '3';     /* 蜂鸣器 */
+            rules->trendAlarmSent = 1;
         }
     }
     else
     {
-        m_risingCount = 0;
-        m_trendAlarmSent = false;
-        m_trendAlarmActive = false;
+        /* 趋势恢复到正常，重置所有趋势相关状态 */
+        rules->risingCount = 0;
+        rules->trendAlarmSent = 0;
+        rules->trendAlarmActive = 0;
     }
 
-    // 2. PAR 控制（用全部累计光照数据计算）
-    double avgLux = m_lightSum / m_dataPointCount;
-    std::lock_guard<std::mutex> lock(m_configMutex);
-    double ppfd = avgLux * m_config.parCoeff;
+    /* ── 第 2 步：PAR 控制 ────────────────── */
+    double avgLux = rules->lightSum / rules->dataPointCount;
+    EnterCriticalSection(&rules->configMutex);
+    double ppfd = avgLux * rules->config.parCoeff;
+    double parMin = rules->config.parMin;
+    double parMax = rules->config.parMax;
+    LeaveCriticalSection(&rules->configMutex);
 
-    if (ppfd < m_config.parMin)
-        cmds.push_back('1');
-    else if (ppfd > m_config.parMax)
-        cmds.push_back('5');
+    if (ppfd < parMin && cmdCount < maxCmds)
+        cmds[cmdCount++] = '1';     /* 开补光 */
+    else if (ppfd > parMax && cmdCount < maxCmds)
+        cmds[cmdCount++] = '5';     /* 关补光 */
 
-    // 3. 温度阈值 + 互锁
-    if (data.temperature > TEMP_MAX)
+    /* ── 第 3 步：温度阈值 ────────────────── */
+    if (temperature > TEMP_MAX)
     {
-        m_tempAlarmActive = true;
-        if (!m_tempAlarmSent)
+        rules->tempAlarmActive = 1;
+        if (!rules->tempAlarmSent && cmdCount < maxCmds)
         {
-            cmds.push_back('3');
-            m_tempAlarmSent = true;
+            cmds[cmdCount++] = '3';     /* 蜂鸣器 */
+            rules->tempAlarmSent = 1;
         }
     }
 
-    // 4. 土壤湿度 + 温度互锁
-    bool shouldIrrigate = (data.soilMoisture < SOIL_DRY && !m_tempAlarmActive);
-    bool shouldStop     = (data.soilMoisture > SOIL_WET && m_irrigating);
+    /* ── 第 4 步：土壤湿度 + 温度互锁 ────── */
+    int shouldIrrigate = (soilMoisture < SOIL_DRY && !rules->tempAlarmActive);
+    int shouldStop     = (soilMoisture > SOIL_WET && rules->irrigating);
 
-    if (shouldIrrigate && !m_irrigating)
+    if (shouldIrrigate && !rules->irrigating)
     {
-        cmds.push_back('4');
-        m_irrigating = true;
-        m_irrigateStart = std::chrono::steady_clock::now();
+        if (cmdCount < maxCmds) cmds[cmdCount++] = '4';     /* 开灌溉 */
+        rules->irrigating = 1;
+        rules->irrigateStartMs = GetTickCount64();          /* 记录开始时间 */
     }
 
     if (shouldStop)
     {
-        cmds.push_back('6');
-        accumulateWaterUsage();
-        m_irrigating = false;
+        if (cmdCount < maxCmds) cmds[cmdCount++] = '6';     /* 关灌溉 */
+        accumulateWaterUsage(rules);    /* 计算本次用水量并累加 */
+        rules->irrigating = 0;
     }
 
-    return cmds;
+    return cmdCount;
 }
 
-// ── 清除温度报警 ────────────────────────────────────────────
-void AnalysisRules::clearAlarm()
+/* 收到 '8' 指令时清除温度报警（仅关蜂鸣器，不清除趋势/灌溉状态） */
+void AnalysisRules_clearAlarm(AnalysisRules* rules)
 {
-    m_tempAlarmActive = false;
-    m_tempAlarmSent   = false;
+    rules->tempAlarmActive = 0;
+    rules->tempAlarmSent   = 0;
 }
 
-// ── 配置读写 ────────────────────────────────────────────────
-void AnalysisRules::updateConfig(const AnalysisConfig &cfg)
+/* ── 配置读写（线程安全） ───────────────────────────────── */
+void AnalysisRules_updateConfig(AnalysisRules* rules, const AnalysisConfig* cfg)
 {
-    std::lock_guard<std::mutex> lock(m_configMutex);
-    m_config = cfg;
+    EnterCriticalSection(&rules->configMutex);
+    rules->config = *cfg;
+    LeaveCriticalSection(&rules->configMutex);
 }
 
-AnalysisConfig AnalysisRules::getConfig() const
+AnalysisConfig AnalysisRules_getConfig(const AnalysisRules* rules)
 {
-    std::lock_guard<std::mutex> lock(m_configMutex);
-    return m_config;
+    AnalysisConfig cfg;
+    /* 注意：const 指针转非 const 以获取锁，数据本身不变 */
+    EnterCriticalSection(&((AnalysisRules*)rules)->configMutex);
+    cfg = rules->config;
+    LeaveCriticalSection(&((AnalysisRules*)rules)->configMutex);
+    return cfg;
 }
 
-// ── 统计查询 ────────────────────────────────────────────────
-double AnalysisRules::avgPpfd() const
+/* ── 只读查询（线程安全说明：字段为 double/int 原子操作，无锁） ── */
+double AnalysisRules_totalWaterUsed(const AnalysisRules* rules) { return rules->totalWaterUsed; }
+int    AnalysisRules_tempAlarmActive(const AnalysisRules* rules)  { return rules->tempAlarmActive; }
+
+/* PPFD 用全部历史光照数据的平均值乘以转换系数计算 */
+double AnalysisRules_avgPpfd(const AnalysisRules* rules)
 {
-    if (m_dataPointCount == 0) return 0;
-    std::lock_guard<std::mutex> lock(m_configMutex);
-    return (m_lightSum / m_dataPointCount) * m_config.parCoeff;
+    if (rules->dataPointCount == 0) return 0;
+    return (rules->lightSum / rules->dataPointCount) * rules->config.parCoeff;
 }
 
-double AnalysisRules::currentDli() const
+/* DLI = avgPPFD × 光照小时数 × 3600 / 1e6（从累计数据点推算时长） */
+double AnalysisRules_currentDli(const AnalysisRules* rules)
 {
-    double avg = avgPpfd();
+    double avg = AnalysisRules_avgPpfd(rules);
     if (avg == 0) return 0;
-    // 从累计数据点推算经过的小时数
-    double hours = m_dataPointCount * 5.0 / 60.0; // 每点5分钟
-    // DLI = avgPPFD × 秒数 / 1e6
+    double hours = rules->dataPointCount * 5.0 / 60.0;     /* 每点 5 分钟 */
     return avg * hours * 3600.0 / 1000000.0;
 }
 
-double AnalysisRules::avgTemperature() const
+double AnalysisRules_avgTemperature(const AnalysisRules* rules)
 {
-    if (m_tempHistory.empty()) return 0;
-    double sum = 0;
-    for (double v : m_tempHistory) sum += v;
-    return sum / m_tempHistory.size();
+    return ringAvg(&rules->tempHistory);
 }
+
+int AnalysisRules_isIrrigating(const AnalysisRules* rules)    { return rules->irrigating; }
+int AnalysisRules_dataPointCount(const AnalysisRules* rules)  { return rules->dataPointCount; }
+int AnalysisRules_isTrendAlarm(const AnalysisRules* rules)    { return rules->trendAlarmActive; }

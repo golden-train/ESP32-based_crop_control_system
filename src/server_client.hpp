@@ -1,66 +1,49 @@
 #pragma once
 
-#include <string>
-#include <vector>
-#include <functional>
-#include <atomic>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
+#include <windows.h>
+#include "sensor_data.hpp"
 
-struct SensorData;
+// 数据接收回调
+typedef void (*ServerDataCallback)(const SensorData* data, void* context);
+typedef void (*ServerAlertCallback)(const char* alert, void* context);
 
 // 与服务端（server_logger.py）通信的 TCP 客户端
-// 长连接模式：接收实时数据推送 + 发送指令 + 日志查询
-class ServerClient
-{
-public:
-    using DataCallback  = std::function<void(const SensorData&)>;
-    using AlertCallback = std::function<void(const std::string&)>;
+typedef struct {
+    char   host[128];
+    int    port;
+    SOCKET sock;
+    volatile LONG running;
+    volatile LONG connected;
+    HANDLE recvThread;
+    HANDLE heartbeatThread;
+    CRITICAL_SECTION sockMutex;
+    ServerDataCallback  dataCb;
+    ServerAlertCallback alertCb;
+    void* context;
+} ServerClient;
 
-    ServerClient();
-    ~ServerClient();
+// 初始化
+void ServerClient_init(ServerClient* sc);
 
-    // 连接服务端（启动接收线程 + 心跳线程）
-    bool connect(const std::string &host, int port);
+// 连接服务端（启动接收线程 + 心跳线程）
+int ServerClient_connect(ServerClient* sc, const char* host, int port);
 
-    // 断开连接
-    void disconnect();
+// 断开连接
+void ServerClient_disconnect(ServerClient* sc);
 
-    bool isConnected() const { return m_connected; }
+// 是否已连接
+int ServerClient_isConnected(const ServerClient* sc);
 
-    // 设置实时数据回调
-    void setDataCallback(DataCallback cb);
-    void setAlertCallback(AlertCallback cb);
+// 设置实时数据回调
+void ServerClient_setDataCallback(ServerClient* sc, ServerDataCallback cb, void* context);
+void ServerClient_setAlertCallback(ServerClient* sc, ServerAlertCallback cb, void* context);
 
-    // 发送控制指令到 ESP32
-    bool sendCommand(const std::string &cmd);
+// 发送控制指令
+int ServerClient_sendCommand(ServerClient* sc, const char* cmd);
 
-    // 极简指令发送：临时连接→发CMD→等200ms→关闭，无线程无心跳
-    static bool sendQuickCmd(const std::string &host, int port,
-                             const std::string &cmd);
+// 极简指令发送：临时连接→发CMD→等200ms→关闭
+int ServerClient_sendQuickCmd(const char* host, int port, const char* cmd);
 
-    // 同步查询历史日志（临时独立连接）
-    bool fetchLogs(const std::string &begin, const std::string &end,
-                   std::vector<std::string> &outLines);
-
-private:
-    void receiveLoop();
-    void heartbeatLoop();
-    bool sendLine(const std::string &line);
-    int createSocket(const std::string &host, int port);
-    bool syncRequest(const std::string &request,
-                     const std::string &endMarker,
-                     std::vector<std::string> &outLines);
-
-    std::string m_host;
-    int m_port = 9090;
-    int m_sock = -1;
-    std::atomic<bool> m_running{false};
-    std::atomic<bool> m_connected{false};
-    std::thread m_recvThread;
-    std::thread m_heartbeatThread;
-    DataCallback  m_dataCb;
-    AlertCallback m_alertCb;
-    mutable std::mutex m_sockMutex;
-};
+// 同步查询历史日志（临时独立连接）
+int ServerClient_fetchLogs(ServerClient* sc, const char* begin, const char* end,
+                           char outLines[][256], int* outCount, int maxLines);

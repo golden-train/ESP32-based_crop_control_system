@@ -3,7 +3,8 @@ chcp 65001 >NUL
 setlocal enabledelayedexpansion
 
 set SRC=src
-set OUT=src\output
+set OUT=output
+set TEMP=temp
 set SFML=C:\tool\SFML-2.6.2
 set CXX=g++
 set "CXXFLAGS=-std=c++17 -O2 -finput-charset=UTF-8 -fexec-charset=UTF-8 -I%SFML%/include -I%SRC% -Wno-cpp"
@@ -17,6 +18,7 @@ if not errorlevel 1 (
 )
 
 if not exist "%OUT%" mkdir "%OUT%"
+if not exist "%TEMP%" mkdir "%TEMP%"
 
 REM 清理旧的中间文件
 del /Q "%OUT%\*.o" "%OUT%\system.exe" 2>NUL

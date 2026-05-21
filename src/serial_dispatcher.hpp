@@ -1,53 +1,48 @@
 #pragma once
 
 #include <windows.h>
-#include <string>
-#include <queue>
-#include <mutex>
-#include <condition_variable>
-#include <atomic>
-#include <thread>
-#include <functional>
+
+#define DISPATCHER_QUEUE_SIZE 16
+#define LINE_MAX 512
+
+// 错误数据回调类型
+typedef void (*ErrorCallback)(const char* line, void* context);
 
 // 线程安全的串口行队列 + 后台读取线程
-// 解决 ESP32 两种上传场景的并发问题：
-//   1. PC 发 "0" → ESP32 正常回传（由主线程消费）
-//   2. ESP32 检测到错误数据自发上传（由错误处理线程消费）
-class SerialDispatcher
-{
-public:
-    // 错误数据回调类型
-    using ErrorCallback = std::function<void(const std::string &)>;
+typedef struct {
+    // 响应队列（环形缓冲区）
+    char queue[DISPATCHER_QUEUE_SIZE][LINE_MAX];
+    int  queueHead;
+    int  queueTail;
+    int  queueCount;
+    CRITICAL_SECTION mutex;
+    CONDITION_VARIABLE cv;
 
-    SerialDispatcher();
-    ~SerialDispatcher();
+    volatile LONG expectingResponse;  // 是否在等待正常响应
+    volatile LONG running;            // 读取线程运行标志
 
-    // 启动后台读取线程（串口必须已打开）
-    void start(HANDLE serialHandle, ErrorCallback onError);
+    HANDLE   readerThread;
+    HANDLE   serialHandle;
+    ErrorCallback errorCb;
+    void*    errorCtx;
+} SerialDispatcher;
 
-    // 停止并等待线程退出
-    void stop();
+// 初始化
+void SerialDispatcher_init(SerialDispatcher* disp);
 
-    // 标记正在等待正常响应（必须在 writeText 之前调用，防竞态）
-    void expectResponse();
+// 启动后台读取线程（串口必须已打开）
+void SerialDispatcher_start(SerialDispatcher* disp, HANDLE serialHandle,
+                            ErrorCallback onError, void* context);
 
-    // 取消等待标记（writeText 失败时回滚）
-    void clearExpectResponse();
+// 停止并等待线程退出
+void SerialDispatcher_stop(SerialDispatcher* disp);
 
-    // 阻塞等待正常响应行（调用前必须先调 expectResponse()）
-    // 超时返回空字符串
-    std::string waitResponse(int timeoutMs = 3000);
+// 标记正在等待正常响应（必须在 writeText 之前调用）
+void SerialDispatcher_expectResponse(SerialDispatcher* disp);
 
-private:
-    void readerLoop(HANDLE serialHandle);
+// 取消等待标记（writeText 失败时回滚）
+void SerialDispatcher_clearExpectResponse(SerialDispatcher* disp);
 
-    std::queue<std::string> m_queue;
-    std::mutex m_mutex;
-    std::condition_variable m_cv;
-
-    std::atomic<bool> m_expectingResponse{false}; // 主线程是否在等待正常响应
-    std::atomic<bool> m_running{false};           // 读取线程运行标志
-
-    std::thread m_readerThread;
-    ErrorCallback m_errorCallback;
-};
+// 阻塞等待正常响应行（超时返回空字符串，返回值 1=有数据, 0=超时）
+int SerialDispatcher_waitResponse(SerialDispatcher* disp, int timeoutMs,
+                                  char* outLine, int maxLen);

@@ -77,14 +77,14 @@ void SensorDisplay::updateData(const SensorData &data)
     if (m_lightHistory.size() > HISTORY_SIZE) m_lightHistory.pop_front();
 }
 
-void SensorDisplay::setHistory(const std::deque<double> &temp,
-                                const std::deque<double> &soil,
-                                const std::deque<double> &light)
+void SensorDisplay::setHistory(const double* temp, int tempCount,
+                                const double* soil, int soilCount,
+                                const double* light, int lightCount)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_tempHistory = temp;
-    m_soilHistory = soil;
-    m_lightHistory = light;
+    m_tempHistory.assign(temp, temp + tempCount);
+    m_soilHistory.assign(soil, soil + soilCount);
+    m_lightHistory.assign(light, light + lightCount);
 }
 
 void SensorDisplay::addLog(const std::string &msg)
@@ -181,6 +181,17 @@ bool SensorDisplay::processEvents()
                 {
                     switchTo(Screen::Menu);
                     break;
+                }
+
+                // 实时数据页：立即刷新按钮
+                if (m_screen == Screen::RealTime)
+                {
+                    sf::FloatRect refBtn{1140, 14, 120, 28};
+                    if (refBtn.contains(mp))
+                    {
+                        pushCommand('T');
+                        addLog(u8"[触发] 指令 T → 立即上报");
+                    }
                 }
 
                 // 手动控制页的特殊按钮
@@ -390,7 +401,7 @@ void SensorDisplay::drawMenu()
         sub.setPosition((1280 - sb.width) / 2, 170);
         m_window.draw(sub);
 
-        sf::Text status(m_connected ? L"● COM6 已连接"
+        sf::Text status(m_connected ? L"● 已连接"
                                     : L"● 演示模式",
                         m_font, 14);
         status.setFillColor(m_connected ? sf::Color(80, 220, 80)
@@ -398,6 +409,12 @@ void SensorDisplay::drawMenu()
         sf::FloatRect stb = status.getLocalBounds();
         status.setPosition((1280 - stb.width) / 2, 200);
         m_window.draw(status);
+
+        sf::Text addr(L"8.137.48.225:9090", m_font, 12);
+        addr.setFillColor(sf::Color(100, 100, 130));
+        sf::FloatRect ab = addr.getLocalBounds();
+        addr.setPosition((1280 - ab.width) / 2, 222);
+        m_window.draw(addr);
     }
 
     // 四个菜单按钮
@@ -487,6 +504,26 @@ void SensorDisplay::drawRealTime()
                 sHist, 0, 100, sf::Color(110, 210, 80, 200));
     drawHistory(startX + 2.0f * (gaugeW + gap), chartY, chartW, chartH,
                 lHist, 0, 2000, sf::Color(255, 220, 60, 200));
+
+    /* "↻ 立即刷新" 按钮 ── 发送 T 指令触发 ESP32 立即上报 */
+    {
+        sf::Vector2f mp{(float)m_mousePos.x, (float)m_mousePos.y};
+        sf::FloatRect refBtn{1140, 14, 120, 28};
+        bool hov = refBtn.contains(mp);
+
+        sf::RectangleShape btn({120, 28});
+        btn.setPosition(1140, 14);
+        btn.setFillColor(hov ? sf::Color(60, 130, 60) : sf::Color(35, 80, 35));
+        btn.setOutlineThickness(1);
+        btn.setOutlineColor(hov ? sf::Color(100, 210, 100) : sf::Color(50, 100, 50));
+        m_window.draw(btn);
+
+        sf::Text txt(L"\x21bb 立即刷新", m_font, 13);
+        txt.setFillColor(hov ? sf::Color::White : sf::Color(180, 220, 180));
+        sf::FloatRect tb = txt.getLocalBounds();
+        txt.setPosition(1140 + (120 - tb.width) / 2, 16);
+        m_window.draw(txt);
+    }
 
     drawLogs();
 }
@@ -1164,7 +1201,7 @@ void SensorDisplay::drawActuatorBar()
 
     // 右侧：连接状态 + 页面
     sf::Text status(
-        m_connected ? L"COM6 已连接" : L"演示模式",
+        m_connected ? L"已连接" : L"演示模式",
         m_font, 12);
     status.setFillColor(m_connected ? sf::Color(80, 220, 80) : sf::Color(240, 180, 40));
     status.setPosition(1280.0f - status.getLocalBounds().width - 100.0f, 778.0f);
@@ -1405,7 +1442,7 @@ void SensorDisplay::drawStatusBar()
     m_window.draw(dot);
 
     sf::Text status(
-        connected ? L"已连接 — 串口 COM6"
+        connected ? L"已连接 — 服务端"
                   : L"演示模式 — 模拟数据",
         m_font, 13);
     status.setFillColor(sf::Color(160, 160, 180));

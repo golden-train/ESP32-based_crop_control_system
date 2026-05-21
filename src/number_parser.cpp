@@ -1,44 +1,66 @@
 #include "number_parser.hpp"
-#include <sstream>
-#include <cctype>
+#include <ctype.h>
+#include <stdlib.h>
+#include <string.h>
 
-std::vector<double> extractNumbers(const std::string &line)
+/*
+ * 从一行文本中提取所有浮点数。
+ * 逐字符扫描，遇到数字/小数点/负号累积到临时缓冲区，遇到分隔符则 strtod 转换。
+ */
+int extractNumbers(const char* line, double* out, int maxCount)
 {
-    std::vector<double> result;
-    std::string current;
+    int count = 0;
+    const char* p = line;
+    char buf[64];
+    int bufPos = 0;
 
-    for (char ch : line)
+    while (*p && count < maxCount)
     {
-        // 数字、小数点、负号属于数值的一部分
-        if (std::isdigit(static_cast<unsigned char>(ch)) ||
-            ch == '.' || ch == '-')
+        char ch = *p;
+        if (isdigit((unsigned char)ch) || ch == '.' || ch == '-')
         {
-            current += ch;
+            if (bufPos < (int)sizeof(buf) - 1)
+                buf[bufPos++] = ch;
         }
-        else if (!current.empty())
+        else if (bufPos > 0)
         {
-            // 遇到分隔符，尝试转换已累积的数字
-            try
-            {
-                result.push_back(std::stod(current));
-            }
-            catch (...)
-            {
-                // 跳过无法转换的内容
-            }
-            current.clear();
+            buf[bufPos] = '\0';
+            out[count++] = strtod(buf, NULL);
+            bufPos = 0;
         }
+        p++;
     }
 
-    // 处理行末最后一个数字
-    if (!current.empty())
+    if (bufPos > 0 && count < maxCount)
     {
-        try
-        {
-            result.push_back(std::stod(current));
-        }
-        catch (...) {}
+        buf[bufPos] = '\0';
+        out[count++] = strtod(buf, NULL);
     }
 
-    return result;
+    return count;
+}
+
+/* 从一行文本解析 SensorData：至少需要 4 个数值，顺序为 温度/湿度/土壤/光照 */
+int tryParseSensorData(const char* line, SensorData* out)
+{
+    double vals[4];
+    int n = extractNumbers(line, vals, 4);
+    if (n >= 4)
+    {
+        out->temperature    = vals[0];
+        out->humidity       = vals[1];
+        out->soilMoisture   = vals[2];
+        out->lightIntensity = vals[3];
+        return 1;
+    }
+    return 0;
+}
+
+/* 从服务端日志行（带时间戳 [xxxx]）解析 SensorData，跳过方括号部分 */
+int parseLogLine(const char* line, SensorData* out)
+{
+    const char* bracketEnd = strrchr(line, ']');
+    if (!bracketEnd)
+        return tryParseSensorData(line, out);
+    return tryParseSensorData(bracketEnd + 1, out);
 }
