@@ -6,6 +6,11 @@
 #include <queue>
 #include <cstring>
 #include <cstdio>
+// 各作物空气湿度范围 [作物][低/高]
+static const double CROP_HUMID_OK[2][2] = {
+    {50, 70},   // 生菜
+    {60, 75},   // 草莓
+};
 
 // 静态成员
 std::queue<char> SensorDisplay::s_cmdQueue;
@@ -139,6 +144,18 @@ double SensorDisplay::getGrowingArea() const
     return m_growingArea;
 }
 
+void SensorDisplay::setCropType(int crop)
+{
+    std::lock_guard<std::mutex> lock(m_analysisMutex);
+    m_cropType = crop;
+}
+
+int SensorDisplay::getCropType() const
+{
+    std::lock_guard<std::mutex> lock(m_analysisMutex);
+    return m_cropType;
+}
+
 bool SensorDisplay::processEvents()
 {
     m_mousePos = sf::Mouse::getPosition(m_window);
@@ -247,9 +264,25 @@ bool SensorDisplay::processEvents()
                         }
                     }
 
+                    // 作物切换按钮
+                    {
+                        sf::FloatRect rCrop0{90, 374, 66, 22};
+                        sf::FloatRect rCrop1{170, 374, 66, 22};
+                        if (rCrop0.contains(mp))
+                        {
+                            setCropType(0);
+                            addLog(u8"[设置] 作物: 生菜 (DLI 目标 17 mol/m²/d)");
+                        }
+                        if (rCrop1.contains(mp))
+                        {
+                            setCropType(1);
+                            addLog(u8"[设置] 作物: 草莓 (DLI 目标 22 mol/m²/d)");
+                        }
+                    }
+
                     // 清除报警按钮
                     {
-                        sf::FloatRect rClear{480, 482, 130, 30};
+                        sf::FloatRect rClear{480, 502, 130, 30};
                         if (rClear.contains(mp))
                         {
                             pushCommand('8');
@@ -747,15 +780,15 @@ void SensorDisplay::drawManualControl()
 
     // ── 三个分析面板 ────────────────────────────
     drawParPanel(30, 270, 1220);
-    drawWaterPanel(30, 388, 1220);
-    drawAlarmPanel(30, 476, 1220);
+    drawWaterPanel(30, 408, 1220);
+    drawAlarmPanel(30, 496, 1220);
 
     // 最近指令记录
     sf::Text logTitle(L"最近指令记录",
                       m_font, 13);
     logTitle.setStyle(sf::Text::Bold);
     logTitle.setFillColor(sf::Color(160, 160, 180));
-    logTitle.setPosition(30, 565);
+    logTitle.setPosition(30, 585);
     m_window.draw(logTitle);
 
     // 显示最近的手动指令日志
@@ -768,7 +801,7 @@ void SensorDisplay::drawManualControl()
         localLogs = m_logs;
     }
 
-    float ly = 588;
+    float ly = 608;
     int shown = 0;
     for (int i = (int)localLogs.size() - 1; i >= 0 && shown < 8; --i, ++shown)
     {
@@ -786,7 +819,7 @@ void SensorDisplay::drawParPanel(float x, float y, float w)
 {
     // 读分析数据
     double growingArea, avgPpfd, dli, avgTemp;
-    int dataPoints;
+    int dataPoints, cropType;
     {
         std::lock_guard<std::mutex> lock(m_analysisMutex);
         growingArea = m_growingArea;
@@ -794,9 +827,10 @@ void SensorDisplay::drawParPanel(float x, float y, float w)
         dli         = m_displayDli;
         avgTemp     = m_displayAvgTemp;
         dataPoints  = m_displayDataPoints;
+        cropType    = m_cropType;
     }
 
-    sf::RectangleShape bg({w, 110});
+    sf::RectangleShape bg({w, 130});
     bg.setPosition(x, y);
     bg.setFillColor(sf::Color(28, 28, 44));
     bg.setOutlineThickness(1);
@@ -876,6 +910,37 @@ void SensorDisplay::drawParPanel(float x, float y, float w)
     avgTempTxt.setFillColor(sf::Color(120, 120, 150));
     avgTempTxt.setPosition(x + 280, y + 82);
     m_window.draw(avgTempTxt);
+
+    // ── 作物选择按钮 ──
+    const wchar_t *cropLabels[] = { L"生菜", L"草莓" };
+    sf::Text cropLabel(L"作物:", m_font, 13);
+    cropLabel.setFillColor(sf::Color(140, 140, 170));
+    cropLabel.setPosition(x + 12, y + 106);
+    m_window.draw(cropLabel);
+
+    for (int i = 0; i < 2; i++)
+    {
+        float bx = x + 60 + i * 80;
+        sf::FloatRect rect{bx, y + 104, 66, 22};
+        sf::Vector2f mp{(float)m_mousePos.x, (float)m_mousePos.y};
+        bool hover = rect.contains(mp);
+        bool selected = (i == cropType);
+
+        sf::RectangleShape btn({66, 22});
+        btn.setPosition(bx, y + 104);
+        btn.setFillColor(selected ? sf::Color(80, 160, 80) :
+                         hover ? sf::Color(55, 55, 85) : sf::Color(40, 40, 60));
+        btn.setOutlineThickness(1);
+        btn.setOutlineColor(selected ? sf::Color(120, 220, 120) :
+                            hover ? sf::Color(100, 100, 140) : sf::Color(60, 60, 90));
+        m_window.draw(btn);
+
+        sf::Text txt(cropLabels[i], m_font, 12);
+        txt.setFillColor(selected ? sf::Color::White : sf::Color(170, 170, 190));
+        sf::FloatRect tb = txt.getLocalBounds();
+        txt.setPosition(bx + (66 - tb.width) / 2, y + 106);
+        m_window.draw(txt);
+    }
 }
 
 // ── 面板：用水量 ──────────────────────────────────────
@@ -982,6 +1047,7 @@ void SensorDisplay::drawSuggestions()
         std::lock_guard<std::mutex> lock(m_mutex);
         data = m_data;
     }
+    int cropType;
     {
         std::lock_guard<std::mutex> lock(m_analysisMutex);
         totalWater  = m_displayTotalWater;
@@ -990,6 +1056,7 @@ void SensorDisplay::drawSuggestions()
         avgTemp     = m_displayAvgTemp;
         alarmActive = m_displayAlarmActive;
         irrigating = m_displayIrrigating;
+        cropType    = m_cropType;
     }
 
     const float leftX = 40.0f;
@@ -1012,6 +1079,8 @@ void SensorDisplay::drawSuggestions()
     m_window.draw(leftTitle);
 
     // 逐项判断
+    double hLow = CROP_HUMID_OK[cropType][0];
+    double hHigh = CROP_HUMID_OK[cropType][1];
     struct {
         const char *label;
         double value;
@@ -1019,7 +1088,7 @@ void SensorDisplay::drawSuggestions()
         bool ok;
         const char *advice;
         sf::Color okColor;
-    } items[4] = {
+    } items[5] = {
         {u8"土壤湿度", data.soilMoisture, u8"%",
          data.soilMoisture >= 30 && data.soilMoisture <= 65,
          data.soilMoisture < 30 ? u8"建议开启灌溉" : u8"建议关闭灌溉或等待回落",
@@ -1029,6 +1098,11 @@ void SensorDisplay::drawSuggestions()
          !alarmActive,
          u8"温度过高！灌溉已禁止，请检查散热",
          sf::Color(230, 80, 80)},
+
+        {u8"空气湿度", data.humidity, u8"%",
+         data.humidity >= hLow && data.humidity <= hHigh,
+         data.humidity < hLow ? u8"湿度过低，建议加湿" : u8"湿度过高，建议通风",
+         sf::Color(100, 200, 220)},
 
         {u8"光照", data.lightIntensity, u8"lux",
          data.lightIntensity >= 50,
@@ -1041,14 +1115,15 @@ void SensorDisplay::drawSuggestions()
          sf::Color(200, 160, 80)},
     };
 
+        int nItems = 5;
     float iy = 110;
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < nItems; i++)
     {
         char buf[128];
-        if (i == 3)
+        if (i == 4)
         {
             // 趋势行特殊处理
-            items[3].ok = (m_displayDataPoints < 6);
+            items[4].ok = (m_displayDataPoints < 6);
             snprintf(buf, sizeof(buf), "数据点: %d", m_displayDataPoints);
         }
         else
@@ -1474,6 +1549,26 @@ void SensorDisplay::render()
     case Screen::Analysis:    drawAnalysis();    break;
     case Screen::Manual:      drawManualControl(); break;
     case Screen::Suggestions: drawSuggestions(); break;
+    }
+
+    // ⚠ 全局报警横幅（所有页面顶部可见）
+    bool alarmActive;
+    {
+        std::lock_guard<std::mutex> lock(m_analysisMutex);
+        alarmActive = m_displayAlarmActive;
+    }
+    if (alarmActive && m_fontLoaded)
+    {
+        sf::RectangleShape banner({1280, 34});
+        banner.setFillColor(sf::Color(200, 40, 40, 230));
+        banner.setPosition(0, 50);
+        m_window.draw(banner);
+
+        sf::Text warnTxt(L"⚠ 温度报警中 — 灌溉已禁止，请在 [手动控制] 页清除报警", m_font, 14);
+        warnTxt.setStyle(sf::Text::Bold);
+        warnTxt.setFillColor(sf::Color::White);
+        warnTxt.setPosition(20, 54);
+        m_window.draw(warnTxt);
     }
 
     // 所有页面底部显示执行器状态条 + 连接状态

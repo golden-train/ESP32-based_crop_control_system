@@ -55,6 +55,10 @@ public:
     void setGrowingArea(double area);
     double getGrowingArea() const;
 
+    // === 作物类型（数据线程同步用） ===
+    void setCropType(int crop);
+    int  getCropType() const;
+
     // === 执行器状态跟踪（数据线程调用） ===
     void applyCommand(char cmd);  // 发送指令后同步更新状态
     bool  isLedOn()    const;
@@ -137,6 +141,7 @@ private:
     bool   m_displayIrrigating = false;
     int    m_displayDataPoints = 0;
     double m_growingArea = 1.0; // 种植面积 (m²)
+    int    m_cropType = 0;      // 0=生菜, 1=草莓
 
     // 执行器状态（数据线程通过 applyCommand 更新）
     bool m_ledOn    = false;

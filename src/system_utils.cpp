@@ -160,6 +160,7 @@ void runAnalysisPoint(SensorData *data)
     {
         AnalysisConfig cfg = AnalysisRules_getConfig(g_rules);
         cfg.growingArea = g_display->getGrowingArea();
+        cfg.cropType = (CropType)g_display->getCropType();
         AnalysisRules_updateConfig(g_rules, &cfg);
     }
 

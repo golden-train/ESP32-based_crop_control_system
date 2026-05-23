@@ -3,13 +3,15 @@
 #include "sensor_data.hpp"
 #include <windows.h>
 
+// 作物类型
+enum CropType { Crop_Lettuce = 0, Crop_Strawberry = 1 };
+
 // 分析配置（UI 可修改，线程安全）
 typedef struct {
     double growingArea;    // 种植面积 (m²)
     double pumpFlowRate;   // 水泵流量 (L/min)
     double parCoeff;       // lux → PPFD 转换系数
-    double parMin;         // PAR 不足阈值 (μmol/m²/s)
-    double parMax;         // PAR 充足阈值 (μmol/m²/s)
+    CropType cropType;     // 当前作物类型
 } AnalysisConfig;
 
 // 环形缓冲区（替代 std::deque）
@@ -43,6 +45,9 @@ typedef struct {
     DWORD64 irrigateStartMs;
     double  totalWaterUsed;
 
+    // 日期（跨天重置 DLI）
+    int lastDay;
+
     // 温度报警
     int tempAlarmActive;
     int tempAlarmSent;
@@ -64,6 +69,9 @@ int AnalysisRules_checkUrgent(AnalysisRules* rules, char* cmds, int maxCmds);
 
 // 收到 '8' 时清除温度报警
 void AnalysisRules_clearAlarm(AnalysisRules* rules);
+
+// 切换作物类型
+void AnalysisRules_selectCrop(AnalysisRules* rules, CropType crop);
 
 // 配置读写（线程安全）
 void AnalysisRules_updateConfig(AnalysisRules* rules, const AnalysisConfig* cfg);

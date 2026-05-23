@@ -1,19 +1,24 @@
 #include "analysis_rules.hpp"
 #include <math.h>
+#include <time.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 /*
- * ── 阈值配置 ─────────────────────────────────────────────
- * 这些静态常量是硬编码的安全阈值，不可通过 UI 修改。
- * TEMP_RELEASE 是温度回落的迟滞值——必须回落到此值以下
- * 且收到 '8' 指令后才能清除报警，防止频繁开关蜂鸣器。
+ * ── 作物参数表 ────────────────────────────────────────────
+ * 索引：Crop_Lettuce=0, Crop_Strawberry=1
  */
-static const double TEMP_MAX     = 35.0;     /* 温度超限报警阈值 (°C) */
-static const double TEMP_RELEASE = 30.0;     /* 温度释放迟滞值 (°C) */
+static const double CROP_DLI[]     = { 17, 22 };   // DLI 目标
+static const double CROP_TMP_MAX[] = { 28, 32 };   // 温度报警阈值
+static const double CROP_TMP_REL[] = { 26, 30 };   // 温度释放阈值
+static const double CROP_TMP_IRR[] = { 26, 30 };   // 高温禁灌阈值
+static const double CROP_SOI_DRY[] = { 22, 25 };   // 开灌溉
+static const double CROP_SOI_WET[] = { 50, 55 };   // 关灌溉
+
 static const double TREND_DELTA  = 0.5;      /* 趋势判断最小差值 (°C) */
 static const int    TREND_COUNT  = 4;        /* 连续趋势报警次数 */
-
-static const double SOIL_DRY     = 20.0;     /* 土壤干阈值：低于此值开灌溉 (%) */
-static const double SOIL_WET     = 65.0;     /* 土壤湿阈值：高于此值关灌溉 (%) */
 
 /*
  * ============================================================
@@ -81,15 +86,16 @@ void AnalysisRules_init(AnalysisRules* rules)
     rules->irrigateStartMs   = 0;
     rules->totalWaterUsed    = 0;
 
+    rules->lastDay           = -1;
+
     rules->tempAlarmActive   = 0;
     rules->tempAlarmSent     = 0;
 
-    /* 分析配置默认值（占位，用户可在 UI 手动修改） */
-    rules->config.growingArea  = 0.1;     /* 种植面积 1 m² */
-    rules->config.pumpFlowRate = 1.0;     /* 水泵流量 1 L/min */
+    /* 分析配置默认值 */
+    rules->config.growingArea  = 0.1;     /* 种植面积 0.1 m² */
+    rules->config.pumpFlowRate = 0.5;     /* 水泵流量 0.5 L/min */
     rules->config.parCoeff     = 0.0185;  /* lux→PPFD 转换系数（需标定） */
-    rules->config.parMin       = 6.0;     /* PAR 不足阈值 */
-    rules->config.parMax       = 16.0;    /* PAR 充足阈值 */
+    rules->config.cropType     = Crop_Lettuce;
 
     InitializeCriticalSection(&rules->configMutex);
 }
@@ -97,9 +103,23 @@ void AnalysisRules_init(AnalysisRules* rules)
 /*
  * 存入一个数据点：三个传感器值分别写入对应的环形缓冲区，
  * 同时累计 PPFD 和光照值用于全程平均计算。
+ * 跨天时重置 DLI 累计，让新一天从零开始。
  */
 void AnalysisRules_feedDataPoint(AnalysisRules* rules, const SensorData* data)
 {
+    /* 跨天检测 */
+    time_t now = time(NULL);
+    struct tm tmNow;
+    localtime_s(&tmNow, &now);
+    int today = tmNow.tm_yday;
+    if (today != rules->lastDay)
+    {
+        rules->ppfdSum        = 0;
+        rules->lightSum       = 0;
+        rules->dataPointCount = 0;
+        rules->lastDay        = today;
+    }
+
     ringPush(&rules->tempHistory, data->temperature);
     ringPush(&rules->soilHistory, data->soilMoisture);
     ringPush(&rules->lightHistory, data->lightIntensity);
@@ -158,12 +178,9 @@ static void accumulateWaterUsage(AnalysisRules* rules)
  *
  * 执行顺序：
  *   1. 趋势检测 → 连续 3 次上升则发蜂鸣器 '3'
- *   2. PAR 计算 → PPFD 不足发补光 '1'，过高关闭 '5'
- *   3. 温度阈值 → 超过 35°C 发蜂鸣器 '3'，设置温度互锁
- *   4. 土壤湿度 → < 30% 且无温度互锁则开灌溉 '4'，> 65% 关闭 '6'
- *
- * 温度互锁逻辑：温度报警激活期间禁止灌溉（即使土壤干燥），
- * 防止高温下灌溉对植物造成伤害。
+ *   2. DLI 补光 → 余弦进度法，日出-日落追 DL 目标
+ *   3. 温度阈值 → 按作物，超限发蜂鸣器 '3' + 灌溉互锁
+ *   4. 土壤湿度 → 按作物 + 高温禁灌，控制水泵 '4'/'6'
  *
  * cmds 数组最多写入 maxCmds 个指令字符，返回实际写入了多少个。
  */
@@ -172,85 +189,126 @@ int AnalysisRules_checkUrgent(AnalysisRules* rules, char* cmds, int maxCmds)
     int cmdCount = 0;
     if (rules->dataPointCount == 0) return 0;
 
-    /* 取最新一个数据点用于阈值判断 */
+    /* 取最新一个数据点 */
     double temperature    = ringSize(&rules->tempHistory)  > 0
                             ? ringAt(&rules->tempHistory, ringSize(&rules->tempHistory) - 1)
                             : 0;
     double soilMoisture   = ringSize(&rules->soilHistory)  > 0
                             ? ringAt(&rules->soilHistory, ringSize(&rules->soilHistory) - 1)
                             : 0;
-    double lightIntensity = ringSize(&rules->lightHistory) > 0
-                            ? ringAt(&rules->lightHistory, ringSize(&rules->lightHistory) - 1)
-                            : 0;
-
     /* ── 第 1 步：趋势检测 ────────────────── */
     if (detectRisingTrend(rules))
     {
         rules->risingCount++;
         if (rules->risingCount >= TREND_COUNT && !rules->trendAlarmSent)
         {
-            if (cmdCount < maxCmds) cmds[cmdCount++] = '3';     /* 蜂鸣器 */
+            if (cmdCount < maxCmds) cmds[cmdCount++] = '3';
             rules->trendAlarmSent = 1;
         }
     }
     else
     {
-        /* 趋势恢复到正常，重置所有趋势相关状态 */
         rules->risingCount = 0;
         rules->trendAlarmSent = 0;
         rules->trendAlarmActive = 0;
     }
 
-    /* ── 第 2 步：PAR 控制 ────────────────── */
-    double avgLux = rules->lightSum / rules->dataPointCount;
-    EnterCriticalSection(&rules->configMutex);
-    double ppfd = avgLux * rules->config.parCoeff;
-    double parMin = rules->config.parMin;
-    double parMax = rules->config.parMax;
-    LeaveCriticalSection(&rules->configMutex);
+    /* ── 第 2 步：DLI 补光（余弦进度法） ──── */
+    int cropIdx;
+    {
+        EnterCriticalSection(&rules->configMutex);
+        cropIdx = (int)rules->config.cropType;
+        LeaveCriticalSection(&rules->configMutex);
+    }
 
-    if (ppfd < parMin && cmdCount < maxCmds)
-        cmds[cmdCount++] = '1';     /* 开补光 */
-    else if (ppfd > parMax && cmdCount < maxCmds)
-        cmds[cmdCount++] = '5';     /* 关补光 */
+    double currentDli = AnalysisRules_currentDli(rules);
+    double dliTarget  = CROP_DLI[cropIdx];
 
-    /* ── 第 3 步：温度阈值 ────────────────── */
-    if (temperature > TEMP_MAX)
+    time_t now = time(NULL);
+    struct tm tmNow;
+    localtime_s(&tmNow, &now);
+    int curMin = tmNow.tm_hour * 60 + tmNow.tm_min;
+    int riseMin = 6 * 60;       /* 日出 6:00 */
+    int setMin  = 18 * 60;      /* 日落 18:00 */
+
+    if (curMin < riseMin)
+    {
+        /* 日出前：强制关补光 */
+        if (cmdCount < maxCmds) cmds[cmdCount++] = '5';
+    }
+    else if (curMin >= setMin)
+    {
+        /* 日落后：全天 DLI 总量未达标则补，够了就关 */
+        if (currentDli < dliTarget)
+            { if (cmdCount < maxCmds) cmds[cmdCount++] = '1'; }
+        else
+            { if (cmdCount < maxCmds) cmds[cmdCount++] = '5'; }
+    }
+    else
+    {
+        /* 白天：按余弦进度比较 */
+        double t = (double)(curMin - riseMin) / (setMin - riseMin);
+        double ratio = 0.5 - 0.5 * cos(M_PI * t);
+        double expected = dliTarget * ratio;
+        if (currentDli < expected)
+            { if (cmdCount < maxCmds) cmds[cmdCount++] = '1'; }
+        else
+            { if (cmdCount < maxCmds) cmds[cmdCount++] = '5'; }
+    }
+
+    /* ── 第 3 步：温度阈值 + 自动释放 ─────── */
+    if (temperature > CROP_TMP_MAX[cropIdx])
     {
         rules->tempAlarmActive = 1;
         if (!rules->tempAlarmSent && cmdCount < maxCmds)
         {
-            cmds[cmdCount++] = '3';     /* 蜂鸣器 */
+            cmds[cmdCount++] = '3';
             rules->tempAlarmSent = 1;
         }
     }
+    else if (rules->tempAlarmActive && temperature < CROP_TMP_REL[cropIdx])
+    {
+        /* 温度回落到释放阈值以下 → 自动清除报警 */
+        rules->tempAlarmActive = 0;
+        rules->tempAlarmSent   = 0;
+    }
 
-    /* ── 第 4 步：土壤湿度 + 温度互锁 ────── */
-    int shouldIrrigate = (soilMoisture < SOIL_DRY && !rules->tempAlarmActive);
-    int shouldStop     = (soilMoisture > SOIL_WET && rules->irrigating);
+    /* ── 第 4 步：土壤湿度 + 高温禁灌 ─────── */
+    int irrigateBlocked = (rules->tempAlarmActive ||
+                           temperature >= CROP_TMP_IRR[cropIdx]);
+    int shouldIrrigate = (soilMoisture < CROP_SOI_DRY[cropIdx] && !irrigateBlocked);
+    int shouldStop     = (soilMoisture > CROP_SOI_WET[cropIdx] && rules->irrigating);
 
     if (shouldIrrigate && !rules->irrigating)
     {
-        if (cmdCount < maxCmds) cmds[cmdCount++] = '4';     /* 开灌溉 */
+        if (cmdCount < maxCmds) cmds[cmdCount++] = '4';
         rules->irrigating = 1;
-        rules->irrigateStartMs = GetTickCount64();          /* 记录开始时间 */
+        rules->irrigateStartMs = GetTickCount64();
     }
 
     if (shouldStop)
     {
-        if (cmdCount < maxCmds) cmds[cmdCount++] = '6';     /* 关灌溉 */
-        accumulateWaterUsage(rules);    /* 计算本次用水量并累加 */
+        if (cmdCount < maxCmds) cmds[cmdCount++] = '6';
+        accumulateWaterUsage(rules);
         rules->irrigating = 0;
     }
 
     return cmdCount;
 }
 
-/* 收到 '8' 指令时清除温度报警（仅关蜂鸣器，不清除趋势/灌溉状态） */
+/* 收到 '8' 指令时清除温度报警 */
 void AnalysisRules_clearAlarm(AnalysisRules* rules)
 {
     rules->tempAlarmActive = 0;
     rules->tempAlarmSent   = 0;
+}
+
+/* 切换作物 */
+void AnalysisRules_selectCrop(AnalysisRules* rules, CropType crop)
+{
+    EnterCriticalSection(&rules->configMutex);
+    rules->config.cropType = crop;
+    LeaveCriticalSection(&rules->configMutex);
 }
 
 /* ── 配置读写（线程安全） ───────────────────────────────── */
