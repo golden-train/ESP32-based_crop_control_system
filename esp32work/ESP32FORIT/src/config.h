@@ -14,12 +14,11 @@
 
 /* ── 传感器引脚 ─────────────────────────────────── */
 #define SOIL_PIN    34     /* 土壤湿度 ADC */
-#define LIGHT_PIN   35     /* 光照 ADC */
 
 /* ── 执行器引脚 ─────────────────────────────────── */
 #define     EXT_LED_PIN   23   /* 补光灯 */
 #define PUMP_PIN      22   /* 水泵继电器（低电平开启） */
-#define BUZZER_PIN    25   /* 蜂鸣器 */
+#define BUZZER_PIN     25   /* 蜂鸣器 */
 
 /* ── 自我判断阈值 ──────────────────────────────── */
 #define TEMP_HIGH      40.0f

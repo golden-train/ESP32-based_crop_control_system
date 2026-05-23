@@ -1,19 +1,9 @@
 #include "sensor_task.h"
 #include "mqtt_handler.h"
 #include "DHT20.h"
+#include "BH1750.h"
 #include "config.h"
 #include <Arduino.h>
-
-/* ADC → lux 近似转换 */
-float adc_to_lux(int raw)
-{
-    if (raw <= 0) return 0.0f;
-    float voltage = raw * 3.3f / 4095.0f;
-    if (voltage < 0.01f) return 0.0f;
-    float diff = 3.3f - voltage;
-    if (diff < 0.01f) diff = 0.01f;
-    return (voltage / diff) * 500.0f;
-}
 
 /*
  * 构建传感器数据行。
@@ -29,10 +19,10 @@ int buildDataLine(char *buf, int bufSize,
     DHT20_read(&temp, &humi);
 
     int soil_raw = analogRead(SOIL_PIN);
-    int light_raw = analogRead(LIGHT_PIN);
+    float light_lux;
+    BH1750_read(&light_lux);
 
     int soil_pct = 100 - (soil_raw * 100 / 4095);
-    float light_lux = adc_to_lux(light_raw);
 
     *outTemp  = temp;
     *outHumi  = humi;

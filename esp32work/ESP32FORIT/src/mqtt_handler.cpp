@@ -28,10 +28,11 @@ static void mqttCallback(char* topic, byte* payload, unsigned int len)
     executeCommand(cmd);
 }
 
-/* ── 重连 MQTT（阻塞） ──────────────────────────── */
+/* ── 重连 MQTT（带超时） ────────────────────────── */
 static void reconnectMQTT()
 {
-    while (!mqttClient.connected())
+    int timeout = 2;    /* 最多尝试 10 秒（2 × 5秒） */
+    while (!mqttClient.connected() && timeout-- > 0)
     {
         Serial.print("[MQTT] 连接中...");
         if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD))
@@ -51,20 +52,31 @@ static void reconnectMQTT()
     }
 }
 
-/* ── 连接 WiFi（阻塞直到成功） ──────────────────── */
+/* ── 连接 WiFi（带超时） ────────────────────────── */
 void wifi_connect(void)
 {
+    WiFi.setSleep(false);                             /* 禁用省电模式，减少掉线 */
     Serial.print("[WiFi] 连接 ");
     Serial.print(WIFI_SSID);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    while (WiFi.status() != WL_CONNECTED)
+
+    int timeout = 30;                                 /* 最多等 15 秒 */
+    while (WiFi.status() != WL_CONNECTED && timeout-- > 0)
     {
         delay(500);
         Serial.print(".");
     }
-    Serial.println(" 已连接");
-    Serial.print("[WiFi] IP: ");
-    Serial.println(WiFi.localIP());
+
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        Serial.println(" 已连接");
+        Serial.print("[WiFi] IP: ");
+        Serial.println(WiFi.localIP());
+    }
+    else
+    {
+        Serial.println(" 失败（超时）");
+    }
 }
 
 /* ── 配置 MQTT 回调并连接 ───────────────────────── */
@@ -78,6 +90,13 @@ void mqtt_begin(void)
 /* ── 保持 MQTT 连接（loop 中周期调用） ──────────── */
 void mqtt_loop(void)
 {
+    /* WiFi 断开时先重连 WiFi */
+    if (WiFi.status() != WL_CONNECTED)
+    {
+        Serial.println("[WiFi] 已断开，尝试重连...");
+        wifi_connect();
+    }
+
     if (!mqttClient.connected())
         reconnectMQTT();
     mqttClient.loop();

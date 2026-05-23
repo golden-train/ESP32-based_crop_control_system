@@ -8,6 +8,7 @@
  *   sensor_task      — 传感器采集/发布/报警
  *   mqtt_handler     — WiFi/MQTT 连接与回调
  *   DHT20            — 温湿度传感器驱动
+ *   BH1750           — 光照传感器驱动
  *   LED              — RGB 指示灯驱动
  */
 #include "config.h"
@@ -16,6 +17,7 @@
 #include "mqtt_handler.h"
 #include "LED.h"
 #include "DHT20.h"
+#include "BH1750.h"
 #include <Arduino.h>
 
 static unsigned long s_lastPublish   = 0;
@@ -35,6 +37,7 @@ void setup()
 
     Led_start();
     DHT20_start();
+    BH1750_start();
     wifi_connect();
     mqtt_begin();
 

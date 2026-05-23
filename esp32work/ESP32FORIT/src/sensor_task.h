@@ -3,9 +3,6 @@
 
 #include "config.h"
 
-/* ADC → lux 近似转换 */
-float adc_to_lux(int raw);
-
 /* 构建传感器数据行（格式 "temp humi soil lux"），返回长度 */
 int buildDataLine(char *buf, int bufSize,
                   float *outTemp, float *outHumi,

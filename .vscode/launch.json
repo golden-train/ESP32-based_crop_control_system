@@ -1,6 +1,7 @@
 {
     "version": "0.2.0",
     "configurations": [
+
         {
             "name": "g++.exe - build and debug",
             "type": "cppdbg",
@@ -12,7 +13,7 @@
             "environment": [],
             "externalConsole": false,
             "MIMode": "gdb",
-            "miDebuggerPath": "C:\\tool\\mingw64\\bin\\gdb.exe",
+            "miDebuggerPath": "gdb.exe",//相对路径，但要添加环境变量
             "setupCommands": [
                 {
                     "description": "Enable gdb pretty printing",
