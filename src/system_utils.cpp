@@ -223,7 +223,7 @@ void processUiCommands(void)
                  ok ? "服务端指令" : "发送失败", c, cmdLabel(c));
         logMessage(buf);
 
-        /* 'T'：触发立即上报后，主动拉取最新数据更新界面 */
+        /* 'T'：触发立即上报，刷新当前仪表值但不改折线图 */
         if (c == 'T' && ok)
         {
             Sleep(500);
@@ -233,8 +233,8 @@ void processUiCommands(void)
                 SensorData data;
                 if (tryParseSensorData(latest, &data))
                 {
-                    processData(&data);
-                    logMessage("[触发] 已获取最新数据");
+                    if (g_display) g_display->setCurrentData(data);
+                    logMessage("[触发] 已获取最新数据（仪表刷新，折线图不变）");
                 }
             }
         }

@@ -34,6 +34,8 @@
             "args": [
                 "-g",
                 "-std=c++17",
+                "-static-libgcc",
+                "-static-libstdc++",
                 "-finput-charset=UTF-8",
                 "-fexec-charset=UTF-8",
                 "-IC:/tool/SFML-2.6.2/include",

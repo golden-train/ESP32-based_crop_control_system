@@ -77,6 +77,12 @@ void SensorDisplay::updateData(const SensorData &data)
     if (m_lightHistory.size() > HISTORY_SIZE) m_lightHistory.pop_front();
 }
 
+void SensorDisplay::setCurrentData(const SensorData &data)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_data = data;
+}
+
 void SensorDisplay::setHistory(const double* temp, int tempCount,
                                 const double* soil, int soilCount,
                                 const double* light, int lightCount)
