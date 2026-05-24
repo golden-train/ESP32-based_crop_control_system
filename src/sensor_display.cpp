@@ -6,6 +6,10 @@
 #include <queue>
 #include <cstring>
 #include <cstdio>
+// 模式切换全局变量（定义在 system_utils.cpp）
+extern volatile int g_currentMode;
+extern volatile int g_modeTogglePending;
+
 // 各作物空气湿度范围 [作物][低/高]
 static const double CROP_HUMID_OK[2][2] = {
     {50, 70},   // 生菜
@@ -86,6 +90,32 @@ void SensorDisplay::setCurrentData(const SensorData &data)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_data = data;
+}
+
+void SensorDisplay::clearAll()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_data = SensorData();
+        m_tempHistory.clear();
+        m_soilHistory.clear();
+        m_lightHistory.clear();
+        m_logs.clear();
+        m_connected = false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_analysisMutex);
+        m_displayTotalWater = 0;
+        m_displayAvgPpfd = 0;
+        m_displayDli = 0;
+        m_displayAvgTemp = 0;
+        m_displayAlarmActive = false;
+        m_displayIrrigating = false;
+        m_displayDataPoints = 0;
+    }
+    m_ledOn = false;
+    m_pumpOn = false;
+    m_buzzerOn = false;
 }
 
 void SensorDisplay::setHistory(const double* temp, int tempCount,
@@ -191,6 +221,15 @@ bool SensorDisplay::processEvents()
                 if (r2.contains(mp)) switchTo(Screen::Analysis);
                 if (r3.contains(mp)) switchTo(Screen::Manual);
                 if (r4.contains(mp)) switchTo(Screen::Suggestions);
+                // 模式切换按钮
+                {
+                    sf::FloatRect rMode{30, 660, 160, 32};
+                    if (rMode.contains(mp) && !g_modeTogglePending)
+                    {
+                        g_modeTogglePending = 1;
+                        addLog(u8"[模式] 切换请求已发送");
+                    }
+                }
                 break;
             }
             case Screen::RealTime:
@@ -498,6 +537,29 @@ void SensorDisplay::drawMenu()
         desc.setPosition(bx + 24, by[i] + 44);
         m_window.draw(desc);
     }
+
+    /* 模式切换按钮（左下角） */
+    {
+        int isDemo = g_currentMode;
+        sf::FloatRect rBtn{30, 660, 160, 32};
+        sf::Vector2f mp{(float)m_mousePos.x, (float)m_mousePos.y};
+        bool hover = rBtn.contains(mp);
+
+        sf::RectangleShape btn({160, 32});
+        btn.setPosition(30, 660);
+        btn.setFillColor(hover ? sf::Color(60, 60, 90) : sf::Color(40, 40, 65));
+        btn.setOutlineThickness(1);
+        btn.setOutlineColor(isDemo ? sf::Color(100, 200, 100) : sf::Color(200, 160, 60));
+        m_window.draw(btn);
+
+        char buf[32];
+        snprintf(buf, sizeof(buf), "切换: %s", isDemo ? "演示→服务端" : "服务端→演示");
+        sf::Text txt(sf::String::fromUtf8((const uint8_t*)buf, (const uint8_t*)buf + strlen(buf)), m_font, 13);
+        txt.setFillColor(hover ? sf::Color::White : sf::Color(180, 180, 200));
+        sf::FloatRect tb = txt.getLocalBounds();
+        txt.setPosition(30 + (160 - tb.width) / 2, 666);
+        m_window.draw(txt);
+    }
 }
 
 // ── 绘制：实时数据（原有仪表盘） ─────────────────────────
@@ -530,7 +592,7 @@ void SensorDisplay::drawRealTime()
               L"土壤湿度", data.soilMoisture, L"%", 0, 100,
               sf::Color(110, 210, 80));
     drawGauge(startX + 2.0f * (gaugeW + gap), gaugeY, gaugeW, gaugeH,
-              L"光照强度", data.lightIntensity, L"lux", 0, 2000,
+              L"光照强度", data.lightIntensity, L"lux", 0, 120000,
               sf::Color(255, 220, 60));
 
     const float chartY = 430.0f;
@@ -542,7 +604,7 @@ void SensorDisplay::drawRealTime()
     drawHistory(startX + (gaugeW + gap),   chartY, chartW, chartH,
                 sHist, 0, 100, sf::Color(110, 210, 80, 200));
     drawHistory(startX + 2.0f * (gaugeW + gap), chartY, chartW, chartH,
-                lHist, 0, 2000, sf::Color(255, 220, 60, 200));
+                lHist, 0, 120000, sf::Color(255, 220, 60, 200));
 
     /* "↻ 立即刷新" 按钮 ── 发送 T 指令触发 ESP32 立即上报 */
     {
@@ -595,7 +657,7 @@ void SensorDisplay::drawAnalysis()
     } charts[] = {
         {L"温度", L"°C", tHist, 0, 50, sf::Color(230, 80, 80)},
         {L"土壤湿度", L"%",  sHist, 0, 100, sf::Color(110, 210, 80)},
-        {L"光照强度", L"lux", lHist, 0, 2000, sf::Color(255, 220, 60)},
+        {L"光照强度", L"lux", lHist, 0, 120000, sf::Color(255, 220, 60)},
     };
 
     for (int i = 0; i < 3; i++)
@@ -979,7 +1041,7 @@ void SensorDisplay::drawWaterPanel(float x, float y, float w)
     statusTxt.setPosition(x + 180, y + 34);
     m_window.draw(statusTxt);
 
-    sf::Text hint(L"土壤 < 55% 开启 | > 73% 关闭 | 温度报警中禁止灌溉", m_font, 11);
+    sf::Text hint(L"土壤 < 55% 开启 | > 73% 关闭 | [温度报警中]禁止灌溉", m_font, 11);
     hint.setFillColor(sf::Color(120, 120, 150));
     hint.setPosition(x + 180, y + 56);
     m_window.draw(hint);
@@ -1025,7 +1087,7 @@ void SensorDisplay::drawAlarmPanel(float x, float y, float w)
     btn.setOutlineColor(sf::Color(200, 80, 60));
     m_window.draw(btn);
 
-    sf::Text clearTxt(L"清除报警 [8]", m_font, 13);
+    sf::Text clearTxt(L"我已知晓 [8]", m_font, 13);
     clearTxt.setStyle(sf::Text::Bold);
     clearTxt.setFillColor(hover ? sf::Color::White : sf::Color(220, 180, 180));
     clearTxt.setPosition(x + 458, y + 9);
@@ -1195,7 +1257,7 @@ void SensorDisplay::drawSuggestions()
         btn.setOutlineThickness(1);
         btn.setOutlineColor(sf::Color(200, 80, 60));
         m_window.draw(btn);
-        sf::Text btnTxt(L"清除报警 [8]", m_font, 13);
+        sf::Text btnTxt(L"我已知晓 [8]", m_font, 13);
         btnTxt.setStyle(sf::Text::Bold);
         btnTxt.setFillColor(hover ? sf::Color::White : sf::Color(220, 180, 180));
         btnTxt.setPosition(rightX + 358, 85);
@@ -1551,7 +1613,7 @@ void SensorDisplay::render()
     case Screen::Suggestions: drawSuggestions(); break;
     }
 
-    // ⚠ 全局报警横幅（所有页面顶部可见）
+    // 全局报警横幅（所有页面顶部可见）
     bool alarmActive;
     {
         std::lock_guard<std::mutex> lock(m_analysisMutex);
@@ -1564,7 +1626,7 @@ void SensorDisplay::render()
         banner.setPosition(0, 50);
         m_window.draw(banner);
 
-        sf::Text warnTxt(L"⚠ 温度报警中 — 灌溉已禁止，请在 [手动控制] 页清除报警", m_font, 14);
+        sf::Text warnTxt(L"[!] 温度报警 — 灌溉已禁止，请在 [手动控制] 页清除报警", m_font, 14);
         warnTxt.setStyle(sf::Text::Bold);
         warnTxt.setFillColor(sf::Color::White);
         warnTxt.setPosition(20, 54);

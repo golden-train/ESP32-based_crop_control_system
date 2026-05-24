@@ -31,6 +31,9 @@ public:
     // 仅更新当前数值（仪表盘刷新），不修改历史折线图
     void setCurrentData(const SensorData &data);
 
+    // 清除所有历史数据和执行器状态（模式切换时调用）
+    void clearAll();
+
     // 批量替换全部历史数据（用于从服务端日志重建折线图）
     void setHistory(const double* temp, int tempCount,
                     const double* soil, int soilCount,

@@ -20,6 +20,10 @@ extern "C" {
 extern SensorDisplay *g_display;
 extern AnalysisRules *g_rules;
 
+/* ── 模式切换 ──────────────────────────────────────────── */
+extern volatile int g_currentMode;       // 1=演示, 0=服务端
+extern volatile int g_modeTogglePending; // UI 请求切换
+
 /* ── 服务端地址 ──────────────────────────────────────────── */
 #define SERVER_HOST "8.137.48.225"
 #define SERVER_PORT 9090

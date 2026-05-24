@@ -16,6 +16,9 @@
 SensorDisplay *g_display    = NULL;
 AnalysisRules *g_rules      = NULL;
 
+volatile int g_currentMode       = 0;  /* 0=服务端, 1=演示 */
+volatile int g_modeTogglePending = 0;
+
 /* ── 工具函数 ────────────────────────────────────────────── */
 
 void logMessage(const char *msg)
@@ -205,7 +208,7 @@ void runAnalysisPoint(SensorData *data)
              AnalysisRules_isTrendAlarm(g_rules) ? "↑报警" : "正常",
              AnalysisRules_avgTemperature(g_rules),
              AnalysisRules_totalWaterUsed(g_rules),
-             AnalysisRules_tempAlarmActive(g_rules) ? " | ⚠ 温度报警" : "");
+             AnalysisRules_tempAlarmActive(g_rules) ? " | [!] 温度报警" : "");
     logMessage(buf);
 }
 

@@ -2,6 +2,7 @@
 
 #include "sensor_data.hpp"
 #include <windows.h>
+#include <time.h>
 
 // 作物类型
 enum CropType { Crop_Lettuce = 0, Crop_Strawberry = 1 };
@@ -35,14 +36,18 @@ typedef struct {
     int trendAlarmActive;
     int trendAlarmSent;
 
-    // PAR
+    // PAR（基于真实时间间隔积分）
     double ppfdSum;
     double lightSum;
     int    dataPointCount;
+    double dliIntegral;      // Σ(PPFD × Δt_sec) 当天累计
+    double lastPpfd;         // 上一个数据点的 PPFD
+    DWORD64 lastDataTick;    // 上一个数据点的毫秒时间戳 (GetTickCount64)
 
     // 灌溉
     int     irrigating;
     DWORD64 irrigateStartMs;
+    time_t  irrigateStartTime;  // 灌溉起始时间戳（实际时间）
     double  totalWaterUsed;
 
     // 日期（跨天重置 DLI）

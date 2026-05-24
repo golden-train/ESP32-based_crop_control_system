@@ -40,7 +40,7 @@ void BH1750_start(void)
     delay(15);
 
     Wire.beginTransmission(s_addr);
-    Wire.write(BH1750_CONT_HR);
+    Wire.write(BH1750_CONT_HR2);   /* H2 模式：0.5 lux，量程 120000 */
     if (Wire.endTransmission() != 0)
     {
         Serial.println("[BH1750] 设置模式失败");
@@ -50,7 +50,7 @@ void BH1750_start(void)
 
     s_ok    = true;
     s_first = true;
-    Serial.println("[BH1750] 已初始化（连续高分辨率模式）");
+    Serial.println("[BH1750] 已初始化（H2 模式，0.5 lux，量程 120000）");
 }
 
 bool BH1750_read(float *lux)
@@ -78,8 +78,8 @@ bool BH1750_read(float *lux)
     uint16_t raw = (Wire.read() << 8) | Wire.read();
     float v = raw / 1.2f;
 
-    /* 合理性校验：BH1750 量程 0 ~ 65535 lux */
-    if (v >= 0.0f && v <= 70000.0f)
+    /* 合理性校验：H2 模式量程 0 ~ 120000 lux */
+    if (v >= 0.0f && v <= 120000.0f)
     {
         s_lastLux = v;
         *lux = v;

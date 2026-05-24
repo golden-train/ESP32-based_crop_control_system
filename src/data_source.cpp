@@ -19,8 +19,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 #define SAMPLE_INTERVAL_SEC 1
+#define USE_DEMO 1  /* 1=演示模式, 0=服务端模式 */
 
 // ============================================================ //
 //                  服务端模式（runServerMode）                   //
@@ -37,7 +42,7 @@ static void runServerMode(void)
 
     time_t lastAnalysisTime = time(NULL) - 60;
 
-    while (g_running)
+    while (g_running && !g_modeTogglePending)
     {
         time_t now = time(NULL);
 
@@ -145,6 +150,78 @@ static void runServerMode(void)
 }
 
 // ============================================================ //
+//                   演示模式                                     //
+// ============================================================ //
+// 1 tick = 5 模拟分钟, Sleep(100). 一天 ≈ 29 秒走完。
+// 可观察到：DLI 累计、温度报警、灌溉控制、补光逻辑。
+
+static void runDemoMode(void)
+{
+    logMessage("[演示模式] 启动（1 tick=5分钟, 一天≈29秒）");
+    if (g_display) g_display->setConnected(false);
+
+    AnalysisRules rules;
+    AnalysisRules_init(&rules);
+    g_rules = &rules;
+
+    int simMin = 360;        /* 6:00 */
+    double soil = 38;
+    int histTick = 0;        /* 折线图采样计数 */
+    int irrTicks = 0;        /* 灌溉累计 tick */
+    double simWater = 0;     /* 模拟用水量累计 */
+
+    while (g_running && !g_modeTogglePending)
+    {
+        int todMin = simMin % 1440;
+        double angle = (todMin - 14 * 60) * 2 * M_PI / 1440;
+
+        double temp = 25 + 5 * sin(angle);          /* 20-30°C */
+        double hum  = 62 - 12 * sin(angle);         /* 50-74% */
+        double lux  = 0;
+        if (todMin >= 360 && todMin < 1080)          /* 6:00-18:00 */
+        {
+            double lAng = (todMin - 360) * M_PI / 720;
+            lux = 33400 * sin(lAng);                /* 峰值 33400 lux (DLI 日总量≈17) */
+        }
+
+        if (rules.irrigating)
+            soil += 0.25;
+        else
+            soil -= 0.2;
+        if (soil > 75) soil = 75;
+        if (soil < 5)  soil = 5;
+
+        SensorData data = { temp, hum, soil, lux };
+
+        if (g_display)
+        {
+            g_display->setCurrentData(data);
+            if (++histTick >= 5) { histTick = 0;
+                g_display->updateData(data); }
+        }
+        runAnalysisPoint(&data);
+
+        /* DLI 修正：每 tick=5 模拟分钟，GetTickCount64 只过 0.1s */
+        rules.dliIntegral += rules.lastPpfd * 299.9;
+
+        /* 演示用水量：按模拟时间累计 */
+        {
+            if (rules.irrigating)
+                irrTicks++;
+            else if (irrTicks > 0)
+            {
+                simWater += 0.5 * (irrTicks * 5.0 / 60.0);
+                irrTicks = 0;
+                rules.totalWaterUsed = simWater;
+            }
+        }
+
+        simMin += 5;
+        Sleep(100);
+    }
+}
+
+// ============================================================ //
 //                   数据线程入口                                 //
 // ============================================================ //
 
@@ -152,9 +229,25 @@ DWORD WINAPI dataThreadFunc(LPVOID arg)
 {
     (void)arg;
 
-    runServerMode();
+    while (g_running)
+    {
+        if (g_modeTogglePending)
+        {
+            g_currentMode = !g_currentMode;
+            g_modeTogglePending = 0;
+            if (g_display) g_display->clearAll();
+            char buf[64];
+            snprintf(buf, sizeof(buf), "[模式] 切换到 %s",
+                     g_currentMode ? "演示模式" : "服务端模式");
+            logMessage(buf);
+        }
 
-    logMessage("[错误] 服务端连接失败，程序退出");
-    g_running = 0;
+        if (g_currentMode)
+            runDemoMode();
+        else
+            runServerMode();
+    }
+
+    logMessage("[错误] 数据线程退出");
     return 0;
 }

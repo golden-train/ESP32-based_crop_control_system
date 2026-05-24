@@ -81,9 +81,13 @@ void AnalysisRules_init(AnalysisRules* rules)
     rules->ppfdSum           = 0;
     rules->lightSum          = 0;
     rules->dataPointCount    = 0;
+    rules->dliIntegral       = 0;
+    rules->lastPpfd          = 0;
+    rules->lastDataTick      = 0;
 
     rules->irrigating        = 0;
     rules->irrigateStartMs   = 0;
+    rules->irrigateStartTime = 0;
     rules->totalWaterUsed    = 0;
 
     rules->lastDay           = -1;
@@ -101,22 +105,26 @@ void AnalysisRules_init(AnalysisRules* rules)
 }
 
 /*
- * 存入一个数据点：三个传感器值分别写入对应的环形缓冲区，
- * 同时累计 PPFD 和光照值用于全程平均计算。
- * 跨天时重置 DLI 累计，让新一天从零开始。
+ * 存入一个数据点：三个传感器值分别写入对应的环形缓冲区。
+ * DLI 基于真实时间间隔积分（而非固定间隔推算），
+ * 即使设备掉线导致数据缺失，累计值仍然准确。
+ * 跨天时重置所有累计，新一天从零开始。
  */
 void AnalysisRules_feedDataPoint(AnalysisRules* rules, const SensorData* data)
 {
-    /* 跨天检测 */
     time_t now = time(NULL);
     struct tm tmNow;
     localtime_s(&tmNow, &now);
     int today = tmNow.tm_yday;
+
     if (today != rules->lastDay)
     {
         rules->ppfdSum        = 0;
         rules->lightSum       = 0;
         rules->dataPointCount = 0;
+        rules->dliIntegral    = 0;
+        rules->lastPpfd       = 0;
+        rules->lastDataTick   = 0;
         rules->lastDay        = today;
     }
 
@@ -124,9 +132,24 @@ void AnalysisRules_feedDataPoint(AnalysisRules* rules, const SensorData* data)
     ringPush(&rules->soilHistory, data->soilMoisture);
     ringPush(&rules->lightHistory, data->lightIntensity);
 
-    /* PPFD 累计需要读取 config.parCoeff，加锁保护 */
     EnterCriticalSection(&rules->configMutex);
     double ppfd = data->lightIntensity * rules->config.parCoeff;
+
+    /* DLI 积分：用上次 PPFD 乘实际间隔秒数 */
+    if (rules->lastDataTick > 0)
+    {
+        DWORD64 tickNow = GetTickCount64();
+        double dt_sec = (tickNow - rules->lastDataTick) / 1000.0;
+        if (dt_sec > 0 && dt_sec < 7200)
+            rules->dliIntegral += rules->lastPpfd * dt_sec;
+        rules->lastDataTick = tickNow;
+    }
+    else
+    {
+        rules->lastDataTick = GetTickCount64();
+    }
+    rules->lastPpfd = ppfd;
+
     rules->ppfdSum += ppfd;
     rules->lightSum += data->lightIntensity;
     rules->dataPointCount++;
@@ -160,12 +183,22 @@ static int detectRisingTrend(AnalysisRules* rules)
 /*
  * ── 灌溉用水量计算 ────────────────────────────────────────
  * 用水量 = 流量 (L/min) × 时长 (分钟)。
- * 时长用 GetTickCount64 计算（毫秒精度，不受系统时间调整影响）。
+ * 优先用 time_t 时间戳（与实际数据间隔一致），
+ * 若不可再用 GetTickCount64 回退。
  */
 static void accumulateWaterUsage(AnalysisRules* rules)
 {
-    DWORD64 now = GetTickCount64();
-    double elapsedSec = (now - rules->irrigateStartMs) / 1000.0;
+    double elapsedSec;
+    time_t now = time(NULL);
+    if (rules->irrigateStartTime > 0)
+    {
+        elapsedSec = difftime(now, rules->irrigateStartTime);
+    }
+    else
+    {
+        DWORD64 ms = GetTickCount64();
+        elapsedSec = (ms - rules->irrigateStartMs) / 1000.0;
+    }
 
     EnterCriticalSection(&rules->configMutex);
     double minutes = elapsedSec / 60.0;
@@ -284,6 +317,7 @@ int AnalysisRules_checkUrgent(AnalysisRules* rules, char* cmds, int maxCmds)
         if (cmdCount < maxCmds) cmds[cmdCount++] = '4';
         rules->irrigating = 1;
         rules->irrigateStartMs = GetTickCount64();
+        rules->irrigateStartTime = time(NULL);
     }
 
     if (shouldStop)
@@ -340,13 +374,10 @@ double AnalysisRules_avgPpfd(const AnalysisRules* rules)
     return (rules->lightSum / rules->dataPointCount) * rules->config.parCoeff;
 }
 
-/* DLI = avgPPFD × 光照小时数 × 3600 / 1e6（从累计数据点推算时长） */
+/* DLI = dliIntegral / 1e6（基于实际时间间隔的积分值） */
 double AnalysisRules_currentDli(const AnalysisRules* rules)
 {
-    double avg = AnalysisRules_avgPpfd(rules);
-    if (avg == 0) return 0;
-    double hours = rules->dataPointCount * 5.0 / 60.0;     /* 每点 5 分钟 */
-    return avg * hours * 3600.0 / 1000000.0;
+    return rules->dliIntegral / 1000000.0;
 }
 
 double AnalysisRules_avgTemperature(const AnalysisRules* rules)
