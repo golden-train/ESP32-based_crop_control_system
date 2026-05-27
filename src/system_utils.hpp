@@ -24,6 +24,11 @@ extern AnalysisRules *g_rules;
 extern volatile int g_currentMode;       // 1=演示, 0=服务端
 extern volatile int g_modeTogglePending; // UI 请求切换
 
+/* ── 天气 ──────────────────────────────────────────────── */
+extern volatile int g_weatherCode;       // WMO 天气码,-1=获取失败
+const char* weatherLabel(int code);      // 天气码 → 中文标签
+int fetchWeather(double lat, double lon);// 查 Open-Meteo,返回 WMO 码
+
 /* ── 服务端地址 ──────────────────────────────────────────── */
 #define SERVER_HOST "8.137.48.225"
 #define SERVER_PORT 9090

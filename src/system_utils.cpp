@@ -5,6 +5,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <windows.h>
+#include <winhttp.h>
 
 #include "system_utils.hpp"
 #include "number_parser.hpp"
@@ -18,6 +19,7 @@ AnalysisRules *g_rules      = NULL;
 
 volatile int g_currentMode       = 0;  /* 0=服务端, 1=演示 */
 volatile int g_modeTogglePending = 0;
+volatile int g_weatherCode       = -1; /* WMO 天气码，-1=未获取 */
 
 /* ── 工具函数 ────────────────────────────────────────────── */
 
@@ -168,7 +170,7 @@ void runAnalysisPoint(SensorData *data)
     }
 
     /* 1. 存入数据点 */
-    AnalysisRules_feedDataPoint(g_rules, data);
+    AnalysisRules_feedDataPoint(g_rules, data, time(NULL));
 
     /* 2. 执行分析 */
     char cmds[8];
@@ -218,7 +220,7 @@ void processUiCommands(void)
     char c;
     while (SensorDisplay::popCommand(c))
     {
-        if (c == '8' && g_rules) AnalysisRules_clearAlarm(g_rules);
+        if (c == '8' && g_rules) { AnalysisRules_clearAlarm(g_rules); if (g_display && g_rules) { g_display->setAnalysisData(AnalysisRules_totalWaterUsed(g_rules), false, AnalysisRules_avgPpfd(g_rules), AnalysisRules_currentDli(g_rules), AnalysisRules_avgTemperature(g_rules), AnalysisRules_isIrrigating(g_rules), AnalysisRules_dataPointCount(g_rules)); } }
         if (g_display) g_display->applyCommand(c);
 
         char buf[128];
@@ -243,4 +245,71 @@ void processUiCommands(void)
             }
         }
     }
+}
+
+const char* weatherLabel(int code)
+{
+    if (code < 0) return "未知";
+    switch (code) {
+    case 0:  return "晴";
+    case 1:  return "少云";
+    case 2:  return "多云";
+    case 3:  return "阴";
+    case 45: case 48: return "雾";
+    case 51: case 53: case 55: return "毛毛雨";
+    case 61: case 63: case 65: return "雨";
+    case 71: case 73: case 75: return "雪";
+    case 80: case 81: case 82: return "阵雨";
+    case 95: case 96: case 99: return "雷暴";
+    default: return "其他";
+    }
+}
+
+int fetchWeather(double lat, double lon)
+{
+    HINTERNET hSession = WinHttpOpen(L"SensorMonitor/1.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
+    if (!hSession) return -1;
+
+    HINTERNET hConnect = WinHttpConnect(hSession,
+        L"api.open-meteo.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return -1; }
+
+    wchar_t path[256];
+    swprintf(path, 256,
+        L"/v1/forecast?latitude=%.2f&longitude=%.2f"
+        L"&daily=weather_code&timezone=auto&forecast_days=1",
+        lat, lon);
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect,
+        L"GET", path, NULL, NULL, NULL, WINHTTP_FLAG_SECURE);
+    if (!hRequest) {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return -1;
+    }
+
+    int code = -1;
+    if (WinHttpSendRequest(hRequest, NULL, 0, NULL, 0, 0, 0) &&
+        WinHttpReceiveResponse(hRequest, NULL))
+    {
+        char buf[4096];
+        DWORD read = 0;
+        int total = 0;
+        while (WinHttpReadData(hRequest, buf + total,
+                sizeof(buf) - 1 - total, &read) && read > 0)
+        {
+            total += read;
+            if (total >= (int)sizeof(buf) - 1) break;
+        }
+        buf[total] = '\0';
+
+        const char* p = strstr(buf, "\"weather_code\":[");
+        if (p) { p += 16; code = atoi(p); }
+    }
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    return code;
 }

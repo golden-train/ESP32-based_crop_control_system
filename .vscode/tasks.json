@@ -59,6 +59,7 @@
                 "-lgdi32",
                 "-lwinmm",
                 "-lws2_32",
+                "-lwinhttp",
                 "-Wall"
             ],
             "options": {

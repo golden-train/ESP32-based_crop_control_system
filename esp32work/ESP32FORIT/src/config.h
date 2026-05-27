@@ -2,7 +2,7 @@
 #define _CONFIG_H
 
 /* ── WiFi 配置 ──────────────────────────────────── */
-#define WIFI_SSID       "MJ7"
+#define WIFI_SSID       "goldentrain"
 #define WIFI_PASSWORD   "zjy20061001"
 
 /* ── MQTT 配置 ──────────────────────────────────── */
@@ -31,7 +31,7 @@
 #define LIGHT_BRIGHT  1500
 
 /* ── 时间间隔 (ms) ──────────────────────────────── */
-#define PUBLISH_INTERVAL    300000   /* 定时上报间隔：5 分钟 */
+#define PUBLISH_INTERVAL    180000   /* 定时上报间隔：3分钟 */
 #define ALERT_INTERVAL       3000   /* 自我判断间隔 */
 
 #endif

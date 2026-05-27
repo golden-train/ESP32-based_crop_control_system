@@ -23,7 +23,7 @@
 
 static int s_wsaInit = 0;
 
-/* 确保 WinSock2 已初始化（只执行一次） */
+/* ── WinSock2 全局初始化（进程内只做一次） ──────────────── */
 static int ensureWsa()
 {
     if (s_wsaInit) return 1;
@@ -44,6 +44,7 @@ static int createSocket(const char* host, int port)
     SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
     if (s == INVALID_SOCKET) return -1;
 
+    /* DNS 解析 + 连接 */
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
     addr.sin_port = htons((u_short)port);
@@ -62,8 +63,8 @@ static int createSocket(const char* host, int port)
 }
 
 /*
- * 线程安全地向 TCP 连接发送一行文本。
- * CRITICAL_SECTION 保护 send 操作不被心跳和主线程同时调用。
+ * 线程安全地发送一行文本。
+ * CRITICAL_SECTION 保护 send 不被心跳和主线程同时调用。
  */
 static int sendLine(ServerClient* sc, const char* line)
 {
@@ -88,13 +89,28 @@ void ServerClient_init(ServerClient* sc)
 
 /*
  * ── TCP 接收线程 ──────────────────────────────────────────
- * 持续读取 TCP 数据，解析行协议：
- *   PONG       → 跳过（心跳回复）
- *   CONNECTED  → 确认连接成功
- *   DATA:xxx   → 提取 4 个传感器数值，调用数据回调
- *   ALERT:xxx  → 调用报警回调
  *
- * 使用 memmove 管理部分接收缓冲区（处理粘包）。
+ * 设计目的：
+ *   服务端会持续推送实时数据，不能每次 recv 都新建连接。
+ *   用一个独立线程循环读取，按行协议拆包分发给回调。
+ *
+ * 粘包处理：
+ *   TCP 是流式传输，一次 recv 可能收到多条数据（粘包），
+ *   也可能只收到半条（拆包）。所以需要缓冲区暂存：
+ *
+ *   新数据 recv 到来
+ *     ↓
+ *   追加到 buffer 尾部
+ *     ↓
+ *   从 buffer 头部逐行处理（遇 \n 截断）
+ *     ↓
+ *   剩余未处理数据 memmove 到 buffer 头部
+ *
+ * 行协议格式：
+ *   DATA:25.3 55.1 42 813   → 传感器数据（4 个数值）
+ *   ALERT:温度异常           → 报警文本
+ *   PONG                     → 心跳回复（忽略）
+ *   CONNECTED               → 服务端确认连接
  */
 static DWORD WINAPI recvLoopFunc(LPVOID arg)
 {
@@ -105,19 +121,20 @@ static DWORD WINAPI recvLoopFunc(LPVOID arg)
 
     while (sc->running && sc->connected)
     {
+        /* 阻塞读取，超时后 recv 返回 -1，WSAGetLastError = WSAETIMEDOUT */
         int received;
         if (sc->sock == INVALID_SOCKET) break;
         received = recv(sc->sock, temp, sizeof(temp) - 1, 0);
 
         if (received > 0)
         {
-            /* 追加到部分接收缓冲区 */
-            if (bufLen + received >= (int)sizeof(buffer)) bufLen = 0;
+            /* ── 新数据追加到缓冲区尾部 ── */
+            if (bufLen + received >= (int)sizeof(buffer)) bufLen = 0;  /* 溢出保护 */
             memcpy(buffer + bufLen, temp, received);
             bufLen += received;
             buffer[bufLen] = '\0';
 
-            /* 逐行处理 */
+            /* ── 从缓冲区头部逐行解析 ── */
             char* p = buffer;
             char* nl;
             while ((nl = strchr(p, '\n')) != NULL)
@@ -125,14 +142,14 @@ static DWORD WINAPI recvLoopFunc(LPVOID arg)
                 *nl = '\0';
                 char* line = p;
                 size_t llen = strlen(line);
-                if (llen > 0 && line[llen - 1] == '\r') line[llen - 1] = '\0';
+                if (llen > 0 && line[llen - 1] == '\r') line[llen - 1] = '\0';  /* 兼容 \r\n */
 
-                if (strcmp(line, "PONG") == 0) { /* 心跳回复，忽略 */ }
+                if (strcmp(line, "PONG") == 0) { /* 心跳回复，无需处理 */ }
                 else if (strcmp(line, "CONNECTED") == 0)
                     printf("[ServerClient] 服务端确认连接\n");
                 else if (strncmp(line, "DATA:", 5) == 0)
                 {
-                    /* 提取 DATA: 后面的数值 */
+                    /* DATA: 后面跟 4 个数字，解析后通过回调推给数据线程 */
                     double vals[4];
                     int n = extractNumbers(line + 5, vals, 4);
                     if (n >= 4 && sc->dataCb)
@@ -146,12 +163,12 @@ static DWORD WINAPI recvLoopFunc(LPVOID arg)
                     }
                 }
                 else if (strncmp(line, "ALERT:", 6) == 0 && sc->alertCb)
-                    sc->alertCb(line + 6, sc->context);
+                    sc->alertCb(line + 6, sc->context);  /* 报警文本直接传给回调 */
 
-                p = nl + 1;
+                p = nl + 1;  /* 移到下一行头部 */
             }
 
-            /* 将剩余未处理数据移到缓冲区开头 */
+            /* ── 未处理完的残片移到缓冲区头部 ── */
             if (p != buffer)
             {
                 int remaining = bufLen - (int)(p - buffer);
@@ -162,22 +179,32 @@ static DWORD WINAPI recvLoopFunc(LPVOID arg)
         }
         else if (received == 0)
         {
+            /* 服务端正常关闭连接，recv 返回 0 */
             printf("[ServerClient] 服务端断开连接\n");
             break;
         }
         else
         {
+            /* 超时是正常的（recv 设置了 5 秒超时），继续等 */
             int err = WSAGetLastError();
-            if (err == WSAETIMEDOUT) continue;   /* 超时正常，继续等待 */
+            if (err == WSAETIMEDOUT) continue;
             if (sc->running) fprintf(stderr, "[ServerClient] recv 错误: %d\n", err);
             break;
         }
     }
-    sc->connected = 0;
+    sc->connected = 0;  /* 通知外部连接已断开 */
     return 0;
 }
 
-/* ── 心跳线程（每 10 秒 PING 一次） ──────────────────────── */
+/*
+ * ── 心跳线程（每 10 秒一次） ───────────────────────────────
+ *
+ * 目的：
+ *   路由器/运营商/NAT 网关会踢掉长时间空闲的 TCP 连接。
+ *   每 10 秒发一个 PING 包维持连接活跃，服务器回复 PONG。
+ *   心跳和正常数据发送共用同一个 socket，用 CRITICAL_SECTION
+ *   防止并发 send 导致数据交叉。
+ */
 static DWORD WINAPI heartbeatLoopFunc(LPVOID arg)
 {
     ServerClient* sc = (ServerClient*)arg;
@@ -196,6 +223,7 @@ int ServerClient_connect(ServerClient* sc, const char* host, int port)
     strncpy_s(sc->host, sizeof(sc->host), host, _TRUNCATE);
     sc->port = port;
 
+    /* 建立底层 TCP 连接 */
     int s = createSocket(host, port);
     if (s < 0) return 0;
 
@@ -203,27 +231,36 @@ int ServerClient_connect(ServerClient* sc, const char* host, int port)
     sc->running = 1;
     sc->connected = 1;
 
-    sendLine(sc, "CONNECT");    /* 发送连接标识 */
+    sendLine(sc, "CONNECT");    /* 通知服务端身份 */
 
-    /* 启动接收和心跳线程 */
+    /* 启动接收和心跳两个后台线程 */
     sc->recvThread = CreateThread(NULL, 0, recvLoopFunc, sc, 0, NULL);
     sc->heartbeatThread = CreateThread(NULL, 0, heartbeatLoopFunc, sc, 0, NULL);
 
     return 1;
 }
 
-/* ── 断开连接 ────────────────────────────────────────────── */
+/*
+ * ── 断开连接 ──────────────────────────────────────────────
+ *
+ * 优雅关闭流程：
+ *   1. 设置标志位（让线程自行退出循环）
+ *   2. shutdown + closesocket（让 recv 立即返回，不等待线程超时）
+ *   3. WaitForSingleObject 等线程结束（最多 3 秒）
+ *   4. CloseHandle 释放线程句柄
+ *   如果不先关闭 socket 直接 Wait，线程可能卡在 recv 上直到 5 秒超时。
+ */
 void ServerClient_disconnect(ServerClient* sc)
 {
     sc->running = 0;
     sc->connected = 0;
 
-    /* 先关闭 socket 让 recv 立即返回，再 join 线程避免阻塞 */
+    /* 先关 socket 让 recv 立刻返回，再 join 线程 */
     EnterCriticalSection(&sc->sockMutex);
     if (sc->sock != INVALID_SOCKET)
     {
-        shutdown(sc->sock, SD_BOTH);
-        closesocket(sc->sock);
+        shutdown(sc->sock, SD_BOTH);      /* 禁止收发 */
+        closesocket(sc->sock);             /* 释放 socket 资源 */
         sc->sock = INVALID_SOCKET;
     }
     LeaveCriticalSection(&sc->sockMutex);
@@ -255,7 +292,7 @@ void ServerClient_setAlertCallback(ServerClient* sc, ServerAlertCallback cb, voi
     sc->alertCb = cb;
 }
 
-/* ── 发送控制指令 ─────────────────────────────────────────── */
+/* ── 通过已有长连接发送控制指令 ─────────────────────────── */
 int ServerClient_sendCommand(ServerClient* sc, const char* cmd)
 {
     char buf[256];
@@ -264,8 +301,11 @@ int ServerClient_sendCommand(ServerClient* sc, const char* cmd)
 }
 
 /*
- * 极简指令发送：临时 TCP 连接 → 发送 CMD → 等 200ms → 关闭。
- * 无线程，无心跳，适用于偶尔发送指令的场景。
+ * ── 极简指令发送 ──────────────────────────────────────────
+ *
+ * 每次创建临时 TCP 连接 → 发送 CMD → 等 200ms → 关闭。
+ * 无线程，无心跳，适合偶尔发送指令的场景（如用户点击按钮）。
+ * 不能用于频繁发送，因为每次都有 TCP 握手开销。
  */
 int ServerClient_sendQuickCmd(const char* host, int port, const char* cmd)
 {
@@ -290,7 +330,7 @@ int ServerClient_sendQuickCmd(const char* host, int port, const char* cmd)
     char req[256];
     snprintf(req, sizeof(req), "CMD:%s\n", cmd);
     send(s, req, (int)strlen(req), 0);
-    Sleep(200);     /* 等待 TCP 数据发送完成再关闭 */
+    Sleep(200);     /* 给 TCP 缓冲区时间把数据发出去再关连接 */
     closesocket(s);
     return 1;
 }
@@ -298,9 +338,15 @@ int ServerClient_sendQuickCmd(const char* host, int port, const char* cmd)
 /*
  * ── 同步查询历史日志 ──────────────────────────────────────
  *
- * 建立临时 TCP 连接，发送 GET_LOGS 请求，等待直到收到 LOGS_END 结束标记。
- * 响应可能较大（数千行），使用 32KB 静态缓冲区接收。
- * 成功后按行解析，跳过协议标记行（LOGS_BEGIN/END、CONNECTED 等）。
+ * 数据线程每分钟调用一次，拉取当日所有日志重建全量图表。
+ * 建立临时 TCP 连接，发送 GET_LOGS 请求，阻塞等待直到
+ * 收到 LOGS_END 结束标记为止。
+ *
+ * 响应特点：
+ *   日志行可能非常多（数千行），响应大小不定。
+ *   使用 32KB 静态缓冲区接收，一般足够。
+ *   收到后过滤掉协议标记行（LOGS_BEGIN/END、ANOMALIES 等），
+ *   只保留纯日志行给调用方。
  */
 int ServerClient_fetchLogs(ServerClient* sc, const char* begin, const char* end,
                            char outLines[][256], int* outCount, int maxLines)
@@ -310,13 +356,14 @@ int ServerClient_fetchLogs(ServerClient* sc, const char* begin, const char* end,
     if (s < 0) return 0;
     SOCKET sock = (SOCKET)s;
 
+    /* 构造请求：GET_LOGS begin=2026-05-14T00:00:00 end=2026-05-14T10:00:00 */
     char req[512];
     snprintf(req, sizeof(req), "GET_LOGS begin=%s end=%s", begin, end);
     char fullReq[520];
     snprintf(fullReq, sizeof(fullReq), "%s\n", req);
     send(sock, fullReq, (int)strlen(fullReq), 0);
 
-    /* 持续接收直到遇到 LOGS_END */
+    /* 持续接收直到遇到 LOGS_END 标记 */
     char buf[4096];
     char response[32768];
     int respLen = 0;
@@ -329,6 +376,7 @@ int ServerClient_fetchLogs(ServerClient* sc, const char* begin, const char* end,
             memcpy(response + respLen, buf, n);
             respLen += n;
         }
+        /* 循环收直到收完或遇到结束标记 */
         while (strstr(response, "LOGS_END") == NULL)
         {
             n = recv(sock, buf, sizeof(buf) - 1, 0);
@@ -345,7 +393,7 @@ int ServerClient_fetchLogs(ServerClient* sc, const char* begin, const char* end,
     if (respLen == 0) return 0;
     response[respLen] = '\0';
 
-    /* 逐行解析，过滤掉协议标记行 */
+    /* ── 按行解析，过滤协议标记行 ── */
     char* line = response;
     char* nl;
     while ((nl = strchr(line, '\n')) != NULL && *outCount < maxLines)
@@ -354,6 +402,7 @@ int ServerClient_fetchLogs(ServerClient* sc, const char* begin, const char* end,
         size_t llen = strlen(line);
         if (llen > 0 && line[llen - 1] == '\r') line[llen - 1] = '\0';
 
+        /* 跳过 CONNECTED、LOGS_BEGIN/END、ANOMALIES_BEGIN/END 等协议行 */
         if (line[0] != '\0' &&
             strcmp(line, "LOGS_BEGIN") != 0 &&
             strcmp(line, "LOGS_END") != 0 &&

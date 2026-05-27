@@ -36,21 +36,22 @@ typedef struct {
     int trendAlarmActive;
     int trendAlarmSent;
 
-    // PAR（基于真实时间间隔积分）
-    double ppfdSum;
+    // DLI
     double lightSum;
     int    dataPointCount;
-    double dliIntegral;      // Σ(PPFD × Δt_sec) 当天累计
+    double dliAccum;         // 全天累计 Σ(PPFD × Δt_sec)
+    double hourAccum;        // 当前小时累计 Σ(PPFD × Δt_sec)
     double lastPpfd;         // 上一个数据点的 PPFD
-    DWORD64 lastDataTick;    // 上一个数据点的毫秒时间戳 (GetTickCount64)
+    time_t lastTs;           // 上一个数据点的时间戳
+    int    currentHour;      // 当前累计的小时 (0-23, -1=未初始化)
 
     // 灌溉
     int     irrigating;
     DWORD64 irrigateStartMs;
-    time_t  irrigateStartTime;  // 灌溉起始时间戳（实际时间）
+    time_t  irrigateStartTime;
     double  totalWaterUsed;
 
-    // 日期（跨天重置 DLI）
+    // 日期（跨天重置所有累计）
     int lastDay;
 
     // 温度报警
@@ -65,11 +66,10 @@ typedef struct {
 // 初始化
 void AnalysisRules_init(AnalysisRules* rules);
 
-// 每 5 分钟：存入一个数据点
-void AnalysisRules_feedDataPoint(AnalysisRules* rules, const SensorData* data);
+// 存入一个数据点，ts 为数据实际时间戳（0=使用当前时间）
+void AnalysisRules_feedDataPoint(AnalysisRules* rules, const SensorData* data, time_t ts);
 
-// 每 5 分钟：趋势检测 + PAR 控制 + 阈值判断，返回指令列表
-// 返回写入 cmds 的指令个数
+// 趋势检测 + 控制判断，返回指令列表
 int AnalysisRules_checkUrgent(AnalysisRules* rules, char* cmds, int maxCmds);
 
 // 收到 '8' 时清除温度报警
@@ -91,3 +91,4 @@ double AnalysisRules_avgTemperature(const AnalysisRules* rules);
 int    AnalysisRules_isIrrigating(const AnalysisRules* rules);
 int    AnalysisRules_dataPointCount(const AnalysisRules* rules);
 int    AnalysisRules_isTrendAlarm(const AnalysisRules* rules);
+double AnalysisRules_hourDli(const AnalysisRules* rules);

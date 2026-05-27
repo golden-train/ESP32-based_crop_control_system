@@ -2,6 +2,8 @@
 #include <math.h>
 #include <time.h>
 
+extern volatile int g_weatherCode;
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -10,48 +12,42 @@
  * ── 作物参数表 ────────────────────────────────────────────
  * 索引：Crop_Lettuce=0, Crop_Strawberry=1
  */
-static const double CROP_DLI[]     = { 17, 22 };   // DLI 目标
-static const double CROP_TMP_MAX[] = { 28, 32 };   // 温度报警阈值
-static const double CROP_TMP_REL[] = { 26, 30 };   // 温度释放阈值
-static const double CROP_TMP_IRR[] = { 26, 30 };   // 高温禁灌阈值
-static const double CROP_SOI_DRY[] = { 22, 25 };   // 开灌溉
-static const double CROP_SOI_WET[] = { 50, 55 };   // 关灌溉
+static const double CROP_DLI[]     = { 17, 22 };
+static const double CROP_TMP_MAX[] = { 28, 32 };
+static const double CROP_TMP_REL[] = { 26, 30 };
+static const double CROP_TMP_IRR[] = { 26, 30 };
+static const double CROP_SOI_DRY[] = { 22, 25 };
+static const double CROP_SOI_WET[] = { 50, 55 };
 
-static const double TREND_DELTA  = 0.5;      /* 趋势判断最小差值 (°C) */
-static const int    TREND_COUNT  = 4;        /* 连续趋势报警次数 */
+/* 每小时 DLI 预算比例（6:00-18:00 共 12 小时，余弦曲线分配） */
+static const double HOUR_RATIO[] = {
+    0.017, 0.050, 0.080, 0.104, 0.121, 0.130,
+    0.130, 0.121, 0.104, 0.080, 0.050, 0.017
+};
 
-/*
- * ============================================================
- *                     环形缓冲区操作
- * ============================================================
- *
- * 使用 RING_MAX (500) 大小的定长数组实现 FIFO 队列。
- * head 指向最旧元素，tail 指向下一个写入位置。
- * 满时覆盖最旧元素（适合滑动窗口统计），无需动态内存分配。
- */
+static const double TREND_DELTA  = 0.5;
+static const int    TREND_COUNT  = 4;
 
-/* 尾端推入：满则覆盖头部最旧数据 */
+
+
 static void ringPush(RingBuffer* rb, double val)
 {
-    if (rb->count >= RING_MAX)
-    {
+    if (rb->count >= RING_MAX) {
         rb->head = (rb->head + 1) % RING_MAX;
         rb->count--;
     }
     rb->data[rb->tail] = val;
     rb->tail = (rb->tail + 1) % RING_MAX;
     rb->count++;
-}
+}//缓冲区
 
 static int ringSize(const RingBuffer* rb) { return rb->count; }
 
-/* 相对索引访问：idx=0 返回头部（最旧），idx=count-1 返回尾部（最新） */
 static double ringAt(const RingBuffer* rb, int idx)
 {
     return rb->data[(rb->head + idx) % RING_MAX];
 }
 
-/* 全部元素求平均 */
 static double ringAvg(const RingBuffer* rb)
 {
     if (rb->count == 0) return 0;
@@ -61,13 +57,14 @@ static double ringAvg(const RingBuffer* rb)
     return sum / rb->count;
 }
 
-/*
- * ============================================================
- *                     AnalysisRules 实现
- * ============================================================
- */
 
-/* 初始化所有字段为默认值 */
+/* 返回当前小时 (6-17) 的 DLI 预算 (mol/m²)，其他小时返回 0 */
+static double hourBudget(int hour, double dliTarget)
+{
+    if (hour < 6 || hour > 17) return 0;
+    return dliTarget * HOUR_RATIO[hour - 6];
+}
+
 void AnalysisRules_init(AnalysisRules* rules)
 {
     rules->tempHistory.head = rules->tempHistory.tail = rules->tempHistory.count = 0;
@@ -78,53 +75,51 @@ void AnalysisRules_init(AnalysisRules* rules)
     rules->trendAlarmActive  = 0;
     rules->trendAlarmSent    = 0;
 
-    rules->ppfdSum           = 0;
-    rules->lightSum          = 0;
-    rules->dataPointCount    = 0;
-    rules->dliIntegral       = 0;
-    rules->lastPpfd          = 0;
-    rules->lastDataTick      = 0;
+    rules->lightSum       = 0;
+    rules->dataPointCount = 0;
+    rules->dliAccum       = 0;
+    rules->hourAccum      = 0;
+    rules->lastPpfd       = 0;
+    rules->lastTs         = 0;
+    rules->currentHour    = -1;
 
     rules->irrigating        = 0;
     rules->irrigateStartMs   = 0;
     rules->irrigateStartTime = 0;
     rules->totalWaterUsed    = 0;
 
-    rules->lastDay           = -1;
+    rules->lastDay = -1;
 
     rules->tempAlarmActive   = 0;
     rules->tempAlarmSent     = 0;
 
-    /* 分析配置默认值 */
-    rules->config.growingArea  = 0.1;     /* 种植面积 0.1 m² */
-    rules->config.pumpFlowRate = 0.5;     /* 水泵流量 0.5 L/min */
-    rules->config.parCoeff     = 0.0185;  /* lux→PPFD 转换系数（需标定） */
+    rules->config.growingArea  = 0.1;
+    rules->config.pumpFlowRate = 0.5;
+    rules->config.parCoeff     = 0.0185;
     rules->config.cropType     = Crop_Lettuce;
 
     InitializeCriticalSection(&rules->configMutex);
 }
 
-/*
- * 存入一个数据点：三个传感器值分别写入对应的环形缓冲区。
- * DLI 基于真实时间间隔积分（而非固定间隔推算），
- * 即使设备掉线导致数据缺失，累计值仍然准确。
- * 跨天时重置所有累计，新一天从零开始。
- */
-void AnalysisRules_feedDataPoint(AnalysisRules* rules, const SensorData* data)
+void AnalysisRules_feedDataPoint(AnalysisRules* rules, const SensorData* data, time_t ts)
 {
-    time_t now = time(NULL);
-    struct tm tmNow;
-    localtime_s(&tmNow, &now);
-    int today = tmNow.tm_yday;
+    if (ts == 0) ts = time(NULL);
 
+    struct tm tmNow;
+    localtime_s(&tmNow, &ts);
+    int today = tmNow.tm_yday;
+    int hour  = tmNow.tm_hour;
+
+    /* 跨天重置 */
     if (today != rules->lastDay)
     {
-        rules->ppfdSum        = 0;
         rules->lightSum       = 0;
         rules->dataPointCount = 0;
-        rules->dliIntegral    = 0;
+        rules->dliAccum       = 0;
+        rules->hourAccum      = 0;
         rules->lastPpfd       = 0;
-        rules->lastDataTick   = 0;
+        rules->lastTs         = 0;
+        rules->currentHour    = -1;
         rules->lastDay        = today;
     }
 
@@ -134,194 +129,163 @@ void AnalysisRules_feedDataPoint(AnalysisRules* rules, const SensorData* data)
 
     EnterCriticalSection(&rules->configMutex);
     double ppfd = data->lightIntensity * rules->config.parCoeff;
-
-    /* DLI 积分：用上次 PPFD 乘实际间隔秒数 */
-    if (rules->lastDataTick > 0)
-    {
-        DWORD64 tickNow = GetTickCount64();
-        double dt_sec = (tickNow - rules->lastDataTick) / 1000.0;
-        if (dt_sec > 0 && dt_sec < 7200)
-            rules->dliIntegral += rules->lastPpfd * dt_sec;
-        rules->lastDataTick = tickNow;
-    }
-    else
-    {
-        rules->lastDataTick = GetTickCount64();
-    }
-    rules->lastPpfd = ppfd;
-
-    rules->ppfdSum += ppfd;
     rules->lightSum += data->lightIntensity;
     rules->dataPointCount++;
     LeaveCriticalSection(&rules->configMutex);
+
+    /* 小时切换时重置 hourAccum */
+    if (hour != rules->currentHour)
+    {
+        rules->hourAccum = 0;
+        rules->currentHour = hour;
+    }
+
+    /* DLI 积分：用真实时间戳间隔 */
+    if (rules->lastTs > 0)
+    {
+        double dt_sec = difftime(ts, rules->lastTs);
+        if (dt_sec > 0 && dt_sec < 7200)
+        {
+            double inc = rules->lastPpfd * dt_sec;
+            rules->dliAccum  += inc;
+            rules->hourAccum += inc;
+        }
+    }
+    rules->lastPpfd = ppfd;
+    rules->lastTs = ts;
 }
 
-/*
- * ── 趋势检测 ──────────────────────────────────────────────
- * 将温度历史数据分为前后两半，比较均值差。
- * 当后半段比前半段高出 TREND_DELTA (0.5°C) 时视为上升趋势。
- * 至少需要 6 个数据点（30 分钟）才有统计意义。
- */
+/* ── 趋势检测 ────────────────────────────────────────────── */
 static int detectRisingTrend(AnalysisRules* rules)
 {
     int n = ringSize(&rules->tempHistory);
     if (n < 6) return 0;
-
     int mid = n / 2;
     double sumFirst = 0, sumSecond = 0;
     for (int i = 0; i < mid; i++)
         sumFirst += ringAt(&rules->tempHistory, i);
     for (int i = mid; i < n; i++)
         sumSecond += ringAt(&rules->tempHistory, i);
-
     double avgFirst  = sumFirst  / mid;
     double avgSecond = sumSecond / (n - mid);
-
     return (avgSecond - avgFirst) > TREND_DELTA;
 }
 
-/*
- * ── 灌溉用水量计算 ────────────────────────────────────────
- * 用水量 = 流量 (L/min) × 时长 (分钟)。
- * 优先用 time_t 时间戳（与实际数据间隔一致），
- * 若不可再用 GetTickCount64 回退。
- */
+/* ── 用水量 ──────────────────────────────────────────────── */
 static void accumulateWaterUsage(AnalysisRules* rules)
 {
     double elapsedSec;
     time_t now = time(NULL);
-    if (rules->irrigateStartTime > 0)
-    {
+    if (rules->irrigateStartTime > 0) {
         elapsedSec = difftime(now, rules->irrigateStartTime);
+    } else {
+        elapsedSec = (GetTickCount64() - rules->irrigateStartMs) / 1000.0;
     }
-    else
-    {
-        DWORD64 ms = GetTickCount64();
-        elapsedSec = (ms - rules->irrigateStartMs) / 1000.0;
-    }
-
     EnterCriticalSection(&rules->configMutex);
-    double minutes = elapsedSec / 60.0;
-    rules->totalWaterUsed += rules->config.pumpFlowRate * minutes;
+    rules->totalWaterUsed += rules->config.pumpFlowRate * (elapsedSec / 60.0);
     LeaveCriticalSection(&rules->configMutex);
 }
 
 /*
- * ── 主分析入口（每 5 分钟调用一次） ──────────────────────
- *
- * 执行顺序：
- *   1. 趋势检测 → 连续 3 次上升则发蜂鸣器 '3'
- *   2. DLI 补光 → 余弦进度法，日出-日落追 DL 目标
- *   3. 温度阈值 → 按作物，超限发蜂鸣器 '3' + 灌溉互锁
- *   4. 土壤湿度 → 按作物 + 高温禁灌，控制水泵 '4'/'6'
- *
- * cmds 数组最多写入 maxCmds 个指令字符，返回实际写入了多少个。
+ * ── 主分析入口 ─────────────────────────────────────────────
  */
 int AnalysisRules_checkUrgent(AnalysisRules* rules, char* cmds, int maxCmds)
 {
     int cmdCount = 0;
     if (rules->dataPointCount == 0) return 0;
 
-    /* 取最新一个数据点 */
-    double temperature    = ringSize(&rules->tempHistory)  > 0
-                            ? ringAt(&rules->tempHistory, ringSize(&rules->tempHistory) - 1)
-                            : 0;
-    double soilMoisture   = ringSize(&rules->soilHistory)  > 0
-                            ? ringAt(&rules->soilHistory, ringSize(&rules->soilHistory) - 1)
-                            : 0;
-    /* ── 第 1 步：趋势检测 ────────────────── */
-    if (detectRisingTrend(rules))
-    {
+    double temperature  = ringSize(&rules->tempHistory) > 0
+        ? ringAt(&rules->tempHistory, ringSize(&rules->tempHistory) - 1) : 0;
+    double soilMoisture = ringSize(&rules->soilHistory) > 0
+        ? ringAt(&rules->soilHistory, ringSize(&rules->soilHistory) - 1) : 0;
+
+    /* ── 第 1 步：趋势检测 ── */
+    if (detectRisingTrend(rules)) {
         rules->risingCount++;
-        if (rules->risingCount >= TREND_COUNT && !rules->trendAlarmSent)
-        {
+        if (rules->risingCount >= TREND_COUNT && !rules->trendAlarmSent) {
             if (cmdCount < maxCmds) cmds[cmdCount++] = '3';
             rules->trendAlarmSent = 1;
         }
-    }
-    else
-    {
+    } else {
         rules->risingCount = 0;
         rules->trendAlarmSent = 0;
         rules->trendAlarmActive = 0;
     }
 
-    /* ── 第 2 步：DLI 补光（余弦进度法） ──── */
+    /* ── 第 2 步：DLI 补光（按小时预算） ── */
     int cropIdx;
+    { EnterCriticalSection(&rules->configMutex);
+      cropIdx = (int)rules->config.cropType;
+      LeaveCriticalSection(&rules->configMutex); }
+
+    double dliTarget = CROP_DLI[cropIdx];
+    int hour = rules->currentHour;
+    if (hour < 0) hour = 0;
+    double budget = hourBudget(hour, dliTarget);
+
+    if (hour < 6 || hour >= 22)
     {
-        EnterCriticalSection(&rules->configMutex);
-        cropIdx = (int)rules->config.cropType;
-        LeaveCriticalSection(&rules->configMutex);
-    }
-
-    double currentDli = AnalysisRules_currentDli(rules);
-    double dliTarget  = CROP_DLI[cropIdx];
-
-    time_t now = time(NULL);
-    struct tm tmNow;
-    localtime_s(&tmNow, &now);
-    int curMin = tmNow.tm_hour * 60 + tmNow.tm_min;
-    int riseMin = 6 * 60;       /* 日出 6:00 */
-    int setMin  = 18 * 60;      /* 日落 18:00 */
-
-    if (curMin < riseMin)
-    {
-        /* 日出前：强制关补光 */
+        /* 22:00-6:00：强制关灯 */
         if (cmdCount < maxCmds) cmds[cmdCount++] = '5';
     }
-    else if (curMin >= setMin)
+    else if (hour >= 6 && hour < 18)
     {
-        /* 日落后：全天 DLI 总量未达标则补，够了就关 */
-        if (currentDli < dliTarget)
-            { if (cmdCount < maxCmds) cmds[cmdCount++] = '1'; }
+        /* 6:00-18:00：按小时预算 + 天气判断 */
+        int isClear = (g_weatherCode >= 0 && g_weatherCode <= 1);
+        double hDli = rules->hourAccum / 1000000.0;
+
+        if (isClear && hour < 15)
+        {
+            if (cmdCount < maxCmds) cmds[cmdCount++] = '5';
+        }
+        else if (hDli < budget)
+        {
+            if (cmdCount < maxCmds) cmds[cmdCount++] = '1';
+        }
         else
-            { if (cmdCount < maxCmds) cmds[cmdCount++] = '5'; }
+        {
+            if (cmdCount < maxCmds) cmds[cmdCount++] = '5';
+        }
     }
     else
     {
-        /* 白天：按余弦进度比较 */
-        double t = (double)(curMin - riseMin) / (setMin - riseMin);
-        double ratio = 0.5 - 0.5 * cos(M_PI * t);
-        double expected = dliTarget * ratio;
-        if (currentDli < expected)
-            { if (cmdCount < maxCmds) cmds[cmdCount++] = '1'; }
+        /* 18:00-22:00：全天 DLI 未达标则补光 */
+        double totalDli = rules->dliAccum / 1000000.0;
+        if (totalDli < dliTarget)
+        {
+            if (cmdCount < maxCmds) cmds[cmdCount++] = '1';
+        }
         else
-            { if (cmdCount < maxCmds) cmds[cmdCount++] = '5'; }
+        {
+            if (cmdCount < maxCmds) cmds[cmdCount++] = '5';
+        }
     }
 
-    /* ── 第 3 步：温度阈值 + 自动释放 ─────── */
-    if (temperature > CROP_TMP_MAX[cropIdx])
-    {
+    /* ── 第 3 步：温度阈值 + 自动释放 ── */
+    if (temperature > CROP_TMP_MAX[cropIdx]) {
         rules->tempAlarmActive = 1;
-        if (!rules->tempAlarmSent && cmdCount < maxCmds)
-        {
+        if (!rules->tempAlarmSent && cmdCount < maxCmds) {
             cmds[cmdCount++] = '3';
             rules->tempAlarmSent = 1;
         }
-    }
-    else if (rules->tempAlarmActive && temperature < CROP_TMP_REL[cropIdx])
-    {
-        /* 温度回落到释放阈值以下 → 自动清除报警 */
+    } else if (rules->tempAlarmActive && temperature < CROP_TMP_REL[cropIdx]) {
         rules->tempAlarmActive = 0;
         rules->tempAlarmSent   = 0;
     }
 
-    /* ── 第 4 步：土壤湿度 + 高温禁灌 ─────── */
+//高温处理，灌溉器互锁，防止高温下浇灌
     int irrigateBlocked = (rules->tempAlarmActive ||
                            temperature >= CROP_TMP_IRR[cropIdx]);
     int shouldIrrigate = (soilMoisture < CROP_SOI_DRY[cropIdx] && !irrigateBlocked);
     int shouldStop     = (soilMoisture > CROP_SOI_WET[cropIdx] && rules->irrigating);
 
-    if (shouldIrrigate && !rules->irrigating)
-    {
+    if (shouldIrrigate && !rules->irrigating) {
         if (cmdCount < maxCmds) cmds[cmdCount++] = '4';
         rules->irrigating = 1;
         rules->irrigateStartMs = GetTickCount64();
         rules->irrigateStartTime = time(NULL);
     }
-
-    if (shouldStop)
-    {
+    if (shouldStop) {
         if (cmdCount < maxCmds) cmds[cmdCount++] = '6';
         accumulateWaterUsage(rules);
         rules->irrigating = 0;
@@ -330,14 +294,12 @@ int AnalysisRules_checkUrgent(AnalysisRules* rules, char* cmds, int maxCmds)
     return cmdCount;
 }
 
-/* 收到 '8' 指令时清除温度报警 */
 void AnalysisRules_clearAlarm(AnalysisRules* rules)
 {
     rules->tempAlarmActive = 0;
     rules->tempAlarmSent   = 0;
 }
 
-/* 切换作物 */
 void AnalysisRules_selectCrop(AnalysisRules* rules, CropType crop)
 {
     EnterCriticalSection(&rules->configMutex);
@@ -345,7 +307,6 @@ void AnalysisRules_selectCrop(AnalysisRules* rules, CropType crop)
     LeaveCriticalSection(&rules->configMutex);
 }
 
-/* ── 配置读写（线程安全） ───────────────────────────────── */
 void AnalysisRules_updateConfig(AnalysisRules* rules, const AnalysisConfig* cfg)
 {
     EnterCriticalSection(&rules->configMutex);
@@ -356,28 +317,30 @@ void AnalysisRules_updateConfig(AnalysisRules* rules, const AnalysisConfig* cfg)
 AnalysisConfig AnalysisRules_getConfig(const AnalysisRules* rules)
 {
     AnalysisConfig cfg;
-    /* 注意：const 指针转非 const 以获取锁，数据本身不变 */
     EnterCriticalSection(&((AnalysisRules*)rules)->configMutex);
     cfg = rules->config;
     LeaveCriticalSection(&((AnalysisRules*)rules)->configMutex);
     return cfg;
 }
 
-/* ── 只读查询（线程安全说明：字段为 double/int 原子操作，无锁） ── */
+/* ── 只读查询 ── */
 double AnalysisRules_totalWaterUsed(const AnalysisRules* rules) { return rules->totalWaterUsed; }
-int    AnalysisRules_tempAlarmActive(const AnalysisRules* rules)  { return rules->tempAlarmActive; }
+int    AnalysisRules_tempAlarmActive(const AnalysisRules* rules) { return rules->tempAlarmActive; }
 
-/* PPFD 用全部历史光照数据的平均值乘以转换系数计算 */
 double AnalysisRules_avgPpfd(const AnalysisRules* rules)
 {
     if (rules->dataPointCount == 0) return 0;
     return (rules->lightSum / rules->dataPointCount) * rules->config.parCoeff;
 }
 
-/* DLI = dliIntegral / 1e6（基于实际时间间隔的积分值） */
 double AnalysisRules_currentDli(const AnalysisRules* rules)
 {
-    return rules->dliIntegral / 1000000.0;
+    return rules->dliAccum / 1000000.0;
+}
+
+double AnalysisRules_hourDli(const AnalysisRules* rules)
+{
+    return rules->hourAccum / 1000000.0;
 }
 
 double AnalysisRules_avgTemperature(const AnalysisRules* rules)

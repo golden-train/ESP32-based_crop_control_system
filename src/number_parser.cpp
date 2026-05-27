@@ -2,6 +2,7 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 /*
  * 从一行文本中提取所有浮点数。
@@ -56,9 +57,49 @@ int tryParseSensorData(const char* line, SensorData* out)
     return 0;
 }
 
-/* 从服务端日志行（带时间戳 [xxxx]）解析 SensorData，跳过方括号部分 */
-int parseLogLine(const char* line, SensorData* out)
+/* 解析日志行开头的时间戳 "[yyyy-MM-dd HH:mm:ss]" 或 "[HH:mm:ss]" */
+static time_t parseTimestamp(const char* line)
 {
+    if (line[0] != '[') return 0;
+    line++;
+
+    struct tm tm = {0};
+    int n;
+
+    /* 完整格式: "2026-05-14 10:00:00]" */
+    n = sscanf(line, "%d-%d-%d %d:%d:%d",
+               &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
+               &tm.tm_hour, &tm.tm_min, &tm.tm_sec);
+    if (n == 6)
+    {
+        tm.tm_year -= 1900;
+        tm.tm_mon  -= 1;
+        tm.tm_isdst = -1;
+        return mktime(&tm);
+    }
+
+    /* 短格式: "10:00:00]" */
+    n = sscanf(line, "%d:%d:%d", &tm.tm_hour, &tm.tm_min, &tm.tm_sec);
+    if (n == 3)
+    {
+        time_t now = time(NULL);
+        struct tm tmNow;
+        localtime_s(&tmNow, &now);
+        tm.tm_year  = tmNow.tm_year;
+        tm.tm_mon   = tmNow.tm_mon;
+        tm.tm_mday  = tmNow.tm_mday;
+        tm.tm_isdst = -1;
+        return mktime(&tm);
+    }
+
+    return 0;
+}
+
+/* 从服务端日志行解析 SensorData + 时间戳 */
+int parseLogLine(const char* line, SensorData* out, time_t* ts)
+{
+    if (ts) *ts = parseTimestamp(line);
+
     const char* bracketEnd = strrchr(line, ']');
     if (!bracketEnd)
         return tryParseSensorData(line, out);

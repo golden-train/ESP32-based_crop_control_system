@@ -55,6 +55,7 @@ static void reconnectMQTT()
 /* ── 连接 WiFi（带超时） ────────────────────────── */
 void wifi_connect(void)
 {
+    WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, INADDR_NONE);
     WiFi.setSleep(false);                             /* 禁用省电模式，减少掉线 */
     Serial.print("[WiFi] 连接 ");
     Serial.print(WIFI_SSID);

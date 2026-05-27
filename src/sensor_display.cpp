@@ -6,9 +6,7 @@
 #include <queue>
 #include <cstring>
 #include <cstdio>
-// 模式切换全局变量（定义在 system_utils.cpp）
-extern volatile int g_currentMode;
-extern volatile int g_modeTogglePending;
+#include "system_utils.hpp"
 
 // 各作物空气湿度范围 [作物][低/高]
 static const double CROP_HUMID_OK[2][2] = {
@@ -493,6 +491,15 @@ void SensorDisplay::drawMenu()
         sf::FloatRect ab = addr.getLocalBounds();
         addr.setPosition((1280 - ab.width) / 2, 222);
         m_window.draw(addr);
+
+        char wbuf[48];
+        snprintf(wbuf, sizeof(wbuf), "今日天气: %s", weatherLabel(g_weatherCode));
+        sf::Text wt(sf::String::fromUtf8((const uint8_t*)wbuf,
+            (const uint8_t*)wbuf + strlen(wbuf)), m_font, 12);
+        wt.setFillColor(sf::Color(130, 200, 240));
+        sf::FloatRect wb = wt.getLocalBounds();
+        wt.setPosition((1280 - wb.width) / 2, 242);
+        m_window.draw(wt);
     }
 
     // 四个菜单按钮
@@ -1302,6 +1309,47 @@ void SensorDisplay::drawSuggestions()
     irrTxt.setFillColor(irrigating ? sf::Color(80, 220, 80) : sf::Color(160, 160, 180));
     irrTxt.setPosition(rightX + 18, sy + 8);
     m_window.draw(irrTxt);
+
+    // 区块4：天气种植建议
+    {
+        int wc = g_weatherCode;
+        const char* wlabel = weatherLabel(wc);
+        const char* wadvice;
+        if (wc < 0) wadvice = "无法获取天气数据，系统按保守策略运行";
+        else if (wc <= 1) wadvice = "日照充足，注意温度过高触发报警，建议午后通风";
+        else if (wc <= 3) wadvice = "云量较多，自然光照偏弱，建议关注DLI进度";
+        else if (wc == 45 || wc == 48) wadvice = "有雾，湿度偏高，注意通风防病";
+        else if (wc <= 65) wadvice = "雨天，光照不足湿度偏高，建议补光并注意通风";
+        else if (wc <= 82) wadvice = "阵雨天气，光照波动大，系统按需补光";
+        else wadvice = "天气不稳定，建议关注传感器数据";
+
+        sf::RectangleShape panel({560, 110});
+        panel.setPosition(660, 520);
+        panel.setFillColor(sf::Color(24, 28, 36));
+        panel.setOutlineThickness(1);
+        panel.setOutlineColor(sf::Color(60, 80, 100));
+        m_window.draw(panel);
+
+        sf::Text title(L"今日种植建议", m_font, 14);
+        title.setStyle(sf::Text::Bold);
+        title.setFillColor(sf::Color(160, 200, 240));
+        title.setPosition(674, 528);
+        m_window.draw(title);
+
+        char wbuf[64];
+        snprintf(wbuf, sizeof(wbuf), "天气: %s", wlabel);
+        sf::Text line1(sf::String::fromUtf8(
+            (const uint8_t*)wbuf, (const uint8_t*)wbuf + strlen(wbuf)), m_font, 13);
+        line1.setFillColor(sf::Color(150, 190, 220));
+        line1.setPosition(678, 552);
+        m_window.draw(line1);
+
+        sf::Text line2(sf::String::fromUtf8(
+            (const uint8_t*)wadvice, (const uint8_t*)wadvice + strlen(wadvice)), m_font, 13);
+        line2.setFillColor(sf::Color(180, 200, 200));
+        line2.setPosition(678, 578);
+        m_window.draw(line2);
+    }
 }
 
 // ── 底部执行器状态条（所有页面共用） ──────────────────────

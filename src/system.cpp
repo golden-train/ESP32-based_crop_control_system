@@ -1,13 +1,3 @@
-/*
- * ESP32 传感器数据监控系统 — 主入口
- *
- * 职责仅限于：初始化、启动数据线程、运行 UI 主循环、清理退出。
- * 所有业务逻辑均在独立模块中实现：
- *   data_source  —— 三种数据源模式（服务端/MQTT/串口）
- *   error_handler —— 错误队列与处理线程
- *   system_utils  —— 公共工具函数与全局变量
- */
-
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <windows.h>
