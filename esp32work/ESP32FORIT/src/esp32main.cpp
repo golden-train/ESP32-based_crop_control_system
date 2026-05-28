@@ -31,7 +31,7 @@ void setup()
     pinMode(EXT_LED_PIN, OUTPUT);
     pinMode(PUMP_PIN, OUTPUT);
     pinMode(BUZZER_PIN, OUTPUT);
-    digitalWrite(EXT_LED_PIN, LOW);
+    digitalWrite(EXT_LED_PIN, HIGH);
     digitalWrite(PUMP_PIN, HIGH);
     digitalWrite(BUZZER_PIN, LOW);
 
