@@ -36,7 +36,7 @@ bool SensorDisplay::popCommand(char &cmd)
 // ── 构造 / 析构 ──────────────────────────────────────────
 SensorDisplay::SensorDisplay()
     : m_window(sf::VideoMode(1280, 800),
-               L"ESP32 传感器监控系统",
+               L"温室监控系统",
                sf::Style::Titlebar | sf::Style::Close)
 {
     const std::vector<std::string> fontPaths = {
@@ -417,7 +417,7 @@ void SensorDisplay::drawTitleBar()
     m_window.draw(bar);
 
     // 标题
-    sf::Text title(L"ESP32 传感器监控系统", m_font, 22);
+    sf::Text title(L"温室系统", m_font, 22);
     title.setStyle(sf::Text::Bold);
     title.setFillColor(sf::Color::White);
     sf::FloatRect tb = title.getLocalBounds();
@@ -516,7 +516,7 @@ void SensorDisplay::drawMenu()
     const wchar_t *descs[] = {
         L"温度、土壤湿度、光照实时仪表盘",
         L"历史趋势图表与统计分析",
-        L"向 ESP32 发送指令控制执行器",
+        L"控制执行器",
         L"基于传感器数据的操作建议",
     };
 
@@ -626,7 +626,7 @@ void SensorDisplay::drawRealTime()
         btn.setOutlineColor(hov ? sf::Color(100, 210, 100) : sf::Color(50, 100, 50));
         m_window.draw(btn);
 
-        sf::Text txt(L"\x21bb 立即刷新", m_font, 13);
+        sf::Text txt(L"立即刷新", m_font, 13);
         txt.setFillColor(hov ? sf::Color::White : sf::Color(180, 220, 180));
         sf::FloatRect tb = txt.getLocalBounds();
         txt.setPosition(1140 + (120 - tb.width) / 2, 16);

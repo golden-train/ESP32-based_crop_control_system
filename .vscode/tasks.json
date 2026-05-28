@@ -2,34 +2,24 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "鍒涘缓娲诲姩鏂囦欢output鐩綍",
+            "label": "创建输出目录",
             "type": "shell",
             "command": "if (-not (Test-Path \"${workspaceFolder}/output\")) { New-Item -ItemType Directory -Path \"${workspaceFolder}/output\" | Out-Null }",
             "problemMatcher": []
         },
         {
-            "label": "复制 SFML 运行库",
-            "type": "shell",
-            "command": "Copy-Item -Force -LiteralPath @('C:/tool/SFML-2.6.2/bin/sfml-graphics-2.dll','C:/tool/SFML-2.6.2/bin/sfml-window-2.dll','C:/tool/SFML-2.6.2/bin/sfml-system-2.dll') -Destination '${workspaceFolder}/output'",
-            "dependsOn": [
-                "鍒涘缓娲诲姩鏂囦欢output鐩綍"
-            ],
-            "dependsOrder": "sequence",
-            "problemMatcher": []
-        },
-        {
-            "label": "创建temp目录",
+            "label": "创建临时目录",
             "type": "shell",
             "command": "if (-not (Test-Path \"${workspaceFolder}/temp\")) { New-Item -ItemType Directory -Path \"${workspaceFolder}/temp\" | Out-Null }",
             "problemMatcher": []
         },
         {
             "type": "cppbuild",
-            "label": "C/C++: g++.exe 鐢熸垚娲诲姩鏂囦欢",
+            "label": "C/C++: g++.exe 生成活动文件",
             "command": "C:/tool/mingw64/bin/g++.exe",
             "dependsOn": [
-                "创建temp目录",
-                "复制 SFML 运行库"
+                "创建输出目录",
+                "创建临时目录"
             ],
             "args": [
                 "-g",
@@ -69,7 +59,7 @@
                 "kind": "build",
                 "isDefault": true
             },
-            "detail": "缂栬瘧鍣? C:/tool/mingw64/bin/g++.exe"
+            "detail": "编译 system.exe（静态链接，无 DLL 依赖）"
         }
     ]
 }

@@ -75,7 +75,7 @@ int AnalysisRules_checkUrgent(AnalysisRules* rules, char* cmds, int maxCmds);
 // 收到 '8' 时清除温度报警
 void AnalysisRules_clearAlarm(AnalysisRules* rules);
 
-// 切换作物类型
+// 切换作物类型（UI 设置时调用）
 void AnalysisRules_selectCrop(AnalysisRules* rules, CropType crop);
 
 // 配置读写（线程安全）
@@ -91,4 +91,3 @@ double AnalysisRules_avgTemperature(const AnalysisRules* rules);
 int    AnalysisRules_isIrrigating(const AnalysisRules* rules);
 int    AnalysisRules_dataPointCount(const AnalysisRules* rules);
 int    AnalysisRules_isTrendAlarm(const AnalysisRules* rules);
-double AnalysisRules_hourDli(const AnalysisRules* rules);

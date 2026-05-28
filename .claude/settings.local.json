@@ -7,7 +7,8 @@
       "Bash(powershell -Command \"& 'C:\\\\cpp_code\\\\for_end\\\\src\\\\output\\\\system.exe' *> 'C:\\\\cpp_code\\\\for_end\\\\temp\\\\output.txt'; Start-Sleep 3; Stop-Process -Name system -Force -ErrorAction SilentlyContinue\")",
       "Bash(cmd /c \"cd /d C:\\\\cpp_code\\\\for_end\\\\src\\\\output && start /B system.exe > C:\\\\cpp_code\\\\for_end\\\\temp\\\\out2.txt 2>&1\")",
       "Bash(taskkill /F /IM system.exe)",
-      "Bash(rm -f /c/cpp_code/for_end/src/output/system.exe)"
+      "Bash(rm -f /c/cpp_code/for_end/src/output/system.exe)",
+      "Bash(./build.bat)"
     ]
   }
 }

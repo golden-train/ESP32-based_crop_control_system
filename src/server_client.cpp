@@ -279,62 +279,6 @@ void ServerClient_disconnect(ServerClient* sc)
     }
 }
 
-int ServerClient_isConnected(const ServerClient* sc) { return sc->connected; }
-
-void ServerClient_setDataCallback(ServerClient* sc, ServerDataCallback cb, void* context)
-{
-    sc->dataCb = cb;
-    sc->context = context;
-}
-
-void ServerClient_setAlertCallback(ServerClient* sc, ServerAlertCallback cb, void* context)
-{
-    sc->alertCb = cb;
-}
-
-/* ── 通过已有长连接发送控制指令 ─────────────────────────── */
-int ServerClient_sendCommand(ServerClient* sc, const char* cmd)
-{
-    char buf[256];
-    snprintf(buf, sizeof(buf), "CMD:%s", cmd);
-    return sendLine(sc, buf);
-}
-
-/*
- * ── 极简指令发送 ──────────────────────────────────────────
- *
- * 每次创建临时 TCP 连接 → 发送 CMD → 等 200ms → 关闭。
- * 无线程，无心跳，适合偶尔发送指令的场景（如用户点击按钮）。
- * 不能用于频繁发送，因为每次都有 TCP 握手开销。
- */
-int ServerClient_sendQuickCmd(const char* host, int port, const char* cmd)
-{
-    if (!ensureWsa()) return 0;
-    SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s == INVALID_SOCKET) return 0;
-
-    struct sockaddr_in addr;
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((u_short)port);
-    struct hostent* he = gethostbyname(host);
-    if (!he) { closesocket(s); return 0; }
-    memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
-
-    int timeout = 3000;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
-    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
-
-    if (connect(s, (struct sockaddr*)&addr, sizeof(addr)) < 0)
-    { closesocket(s); return 0; }
-
-    char req[256];
-    snprintf(req, sizeof(req), "CMD:%s\n", cmd);
-    send(s, req, (int)strlen(req), 0);
-    Sleep(200);     /* 给 TCP 缓冲区时间把数据发出去再关连接 */
-    closesocket(s);
-    return 1;
-}
-
 /*
  * ── 同步查询历史日志 ──────────────────────────────────────
  *

@@ -338,11 +338,6 @@ double AnalysisRules_currentDli(const AnalysisRules* rules)
     return rules->dliAccum / 1000000.0;
 }
 
-double AnalysisRules_hourDli(const AnalysisRules* rules)
-{
-    return rules->hourAccum / 1000000.0;
-}
-
 double AnalysisRules_avgTemperature(const AnalysisRules* rules)
 {
     return ringAvg(&rules->tempHistory);

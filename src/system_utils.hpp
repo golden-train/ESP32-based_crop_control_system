@@ -53,12 +53,6 @@ int sendCmdRaw(const char *host, int port, char cmd);
 // 向服务端查询最新一条数据：GET_LATEST → 返回值写入 line
 int fetchLatestRaw(const char *host, int port, char *line, int maxLen);
 
-// 检查并处理手动指令队列（各模式函数共用）
-void processManualCommands(void);
-
-// 5 分钟分析点：feedData → checkUrgent → 发指令 → 推送 UI
-void runAnalysisPoint(SensorData *data);
-
 // UI 线程处理手动指令（含 'T' 触发拉取最新数据）
 void processUiCommands(void);
 

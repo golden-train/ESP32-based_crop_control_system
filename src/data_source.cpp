@@ -100,9 +100,19 @@ static void runServerMode(void)
         int histCount = 0;
         SensorData latestData = {0};
 
+        int anomalyDetected = 0;
         for (int i = 0; i < logCount; i++)
         {
-            if (strstr(logLines[i], "[ANOMALY]")) continue;
+            if (strstr(logLines[i], "[ANOMALY]"))
+            {
+                if (!anomalyDetected)
+                {
+                    anomalyDetected = 1;
+                    rules.tempAlarmActive = 1;
+                    logMessage("[告警] ESP32 检测到传感器数据异常！");
+                }
+                continue;
+            }
 
             SensorData data;
             time_t ts = 0;

@@ -1,0 +1,10 @@
+# 编译输出
+output/*.o
+output/*.exe
+
+# SFML 运行时 DLL（不提交）
+output/*.dll
+
+# 其他
+*.zip
+*.tmp
