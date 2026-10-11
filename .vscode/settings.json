@@ -1,6 +1,6 @@
 {
   "files.encoding": "utf8",
-  "hoverTranslator.apiKey": "sk-cde489af982c4a59a20c44970086ae05",
+  "hoverTranslator.apiKey": "eg",
   "hoverTranslator.baseURL": "https://api.deepseek.com/v1",
   "hoverTranslator.model": "deepseek-chat"
 }
