@@ -8,3 +8,6 @@ output/*.dll
 # 其他
 *.zip
 *.tmp
+
+# Local VS Code settings
+.vscode/settings.json
